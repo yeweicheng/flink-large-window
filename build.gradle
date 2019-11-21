@@ -1,0 +1,135 @@
+buildscript {
+    repositories {
+        jcenter() // this applies only to the Gradle 'Shadow' plugin
+    }
+    dependencies {
+        classpath 'com.github.jengelman.gradle.plugins:shadow:2.0.4'
+    }
+}
+
+plugins {
+    id 'java'
+    id 'scala'
+    id 'application'
+    // shadow plugin to produce fat JARs
+    id 'com.github.johnrengelman.shadow' version '2.0.4'
+}
+
+
+// artifact properties
+group = 'org.yewc.flink'
+version = '0.1-SNAPSHOT'
+mainClassName = 'org.yewc.flink.core.EngineMain'
+description = """Flink Quickstart Job"""
+
+ext {
+    javaVersion = '1.8'
+    flinkVersion = '1.8.0'
+    scalaBinaryVersion = '2.11'
+    slf4jVersion = '1.7.7'
+    log4jVersion = '1.2.17'
+}
+
+
+sourceCompatibility = javaVersion
+targetCompatibility = javaVersion
+tasks.withType(JavaCompile) {
+    options.encoding = 'UTF-8'
+}
+
+applicationDefaultJvmArgs = ["-Dlog4j.configuration=log4j.properties"]
+
+task wrapper(type: Wrapper) {
+    gradleVersion = '4.6'
+}
+
+// declare where to find the dependencies of your project
+repositories {
+    maven{ url 'https://repo.spring.io/plugins-release/'}
+}
+
+// NOTE: We cannot use "compileOnly" or "shadow" configurations since then we could not run code
+// in the IDE or with "gradle run". We also cannot exclude transitive dependencies from the
+// shadowJar yet (see https://github.com/johnrengelman/shadow/issues/159).
+// -> Explicitly define the // libraries we want to be included in the "flinkShadowJar" configuration!
+configurations {
+    flinkShadowJar // dependencies which go into the shadowJar
+
+    // always exclude these (also from transitive dependencies) since they are provided by Flink
+    flinkShadowJar.exclude group: 'org.apache.flink', module: 'force-shading'
+    flinkShadowJar.exclude group: 'com.google.code.findbugs', module: 'jsr305'
+}
+
+// declare the dependencies for your production and test code
+dependencies {
+    // --------------------------------------------------------------
+    // Compile-time dependencies that should NOT be part of the
+    // shadow jar and are provided in the lib folder of Flink
+    // --------------------------------------------------------------
+    compile group: 'org.roaringbitmap', name: 'RoaringBitmap', version: '0.8.11'
+    flinkShadowJar "org.apache.flink:flink-java:${flinkVersion}"
+    flinkShadowJar "org.apache.flink:flink-streaming-java_${scalaBinaryVersion}:${flinkVersion}"
+
+    // --------------------------------------------------------------
+    // Dependencies that should be part of the shadow jar, e.g.
+    // connectors. These must be in the flinkShadowJar configuration!
+    // --------------------------------------------------------------
+//    flinkShadowJar "org.apache.flink:flink-connector-kafka_${scalaBinaryVersion}:${flinkVersion}"
+
+    flinkShadowJar "log4j:log4j:1.2.17"
+    flinkShadowJar "org.slf4j:slf4j-log4j12:1.7.7"
+
+    flinkShadowJar group: 'org.apache.flink', name: 'flink-core', version: '1.8.0'
+    flinkShadowJar group: 'org.apache.flink', name: 'flink-connector-kafka_2.11', version: '1.8.0'
+    flinkShadowJar group: 'org.apache.flink', name: 'flink-streaming-java_2.11', version: '1.8.0'
+    flinkShadowJar group: 'org.apache.flink', name: 'flink-table', version: '1.8.0'
+    flinkShadowJar group: 'org.apache.flink', name: 'flink-table-planner_2.11', version: '1.8.0'
+    flinkShadowJar group: 'org.apache.flink', name: 'flink-streaming-scala_2.11', version: '1.8.0'
+    flinkShadowJar group: 'org.apache.flink', name: 'flink-statebackend-rocksdb_2.11', version: '1.8.0'
+    flinkShadowJar group: 'org.apache.hadoop', name: 'hadoop-client', version: '2.7.1'
+    flinkShadowJar group: 'org.apache.kudu', name: 'kudu-client', version: '1.8.0'
+    flinkShadowJar group: 'com.alibaba', name: 'fastjson', version: '1.2.56'
+    flinkShadowJar group: 'ch.qos.logback', name: 'logback-core', version: '1.2.3'
+    flinkShadowJar group: 'ch.qos.logback', name: 'logback-classic', version: '1.2.3'
+    flinkShadowJar group: 'com.github.jsqlparser', name: 'jsqlparser', version: '2.0'
+    flinkShadowJar group: 'org.apache.commons', name: 'commons-jexl3', version: '3.1'
+    flinkShadowJar group: 'org.apache.flink', name: 'flink-test-utils_2.11', version: '1.8.0'
+
+    flinkShadowJar(files('C:\\Users\\barneyye\\IdeaProjects\\flink-kudu-sink\\build\\libs\\flink-kudu-sink-1.0-SNAPSHOT.jar'))
+    flinkShadowJar(files('C:\\Users\\barneyye\\Downloads\\flink-executor-local.jar'))
+}
+
+// make compileOnly dependencies available for tests:
+sourceSets {
+    main {
+        scala {
+            srcDirs = ['src/main/scala', 'src/test/scala']
+        }
+        java {
+            srcDirs = ['src/main/java', 'src/test/java']
+        }
+    }
+
+    main.compileClasspath += configurations.flinkShadowJar
+    main.runtimeClasspath += configurations.flinkShadowJar
+
+    test.compileClasspath += configurations.flinkShadowJar
+    test.runtimeClasspath += configurations.flinkShadowJar
+
+    javadoc.classpath += configurations.flinkShadowJar
+}
+
+run.classpath = sourceSets.main.runtimeClasspath
+
+//jar {
+//    manifest {
+//        attributes 'Built-By': System.getProperty('user.name'),
+//                'Build-Jdk': System.getProperty('java.version')
+//    }
+//    zip64 true
+//}
+//
+//shadowJar {
+//    configurations = [project.configurations.flinkShadowJar]
+//    zip64 true
+//}
