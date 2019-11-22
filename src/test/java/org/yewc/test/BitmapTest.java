@@ -3,17 +3,31 @@ package org.yewc.test;
 import org.roaringbitmap.RoaringBitmap;
 import org.roaringbitmap.longlong.Roaring64NavigableMap;
 
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+
 public class BitmapTest {
 
     public static void main(String[] args) throws Exception {
         long s = System.currentTimeMillis();
         for (int j = 0; j < 10000; j++) {
-            Roaring64NavigableMap all = new Roaring64NavigableMap();
+//            Roaring64NavigableMap all = new Roaring64NavigableMap();
+//            List<Roaring64NavigableMap> children = new ArrayList<>();
+//            for (int i = 0; i < 100; i++) {
+//                Roaring64NavigableMap current = new Roaring64NavigableMap();
+//                current.add(i + 100000000);
+//                children.add(current);
+//                all.or(current);
+////                all.add(i + 100000000);
+//            }
+            Set<Integer> all = new HashSet<>();
             for (int i = 0; i < 100; i++) {
-                Roaring64NavigableMap temp = new Roaring64NavigableMap();
-                temp.add(i + 100000000);
-                all.or(temp);
-//                all.add(i + 100000000);
+                Set<Integer> dataSet = new HashSet<>();
+                dataSet.add(i);
+                all.addAll(dataSet);
             }
         }
         long e = System.currentTimeMillis();

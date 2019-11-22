@@ -26,10 +26,12 @@ public class KafkaProducerTest {
 
         while (true) {
             Thread.sleep(100);
+            int value = random.nextInt(10000);
             JSONObject jo = new JSONObject();
             jo.put("c1", abc[random.nextInt(26)]);
-            jo.put("c2", random.nextInt(10000));
-            jo.put("c3", System.currentTimeMillis());
+            jo.put("c2", random.nextInt(3));
+            jo.put("c3", Long.valueOf(value));
+            jo.put("c4", System.currentTimeMillis());
             String data = jo.toString();
             producer.send(new ProducerRecord<String, String>(topic, data));
 //            System.out.println(data);

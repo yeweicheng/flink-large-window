@@ -10,7 +10,7 @@ import java.util.*;
 public class CountValueData extends ValueData {
 
     private Long value;
-    private LinkedHashMap<Long, Long> globalWindow;
+    private Map<Long, Long> globalWindow;
 
     public CountValueData(Long windowUnix, Long windowSlide, int timeField, int theField) {
         this(windowUnix, windowSlide, 0L, timeField, theField);
@@ -19,15 +19,20 @@ public class CountValueData extends ValueData {
     public CountValueData(Long windowUnix, Long windowSlide, Long lateness, int timeField, int theField) {
         super(windowUnix, windowSlide, lateness, timeField, theField);
         this.value = 0L;
-        this.globalWindow = new LinkedHashMap<>();
+        this.globalWindow = new HashMap<>();
     }
 
     @Override
     public void putElements(Iterable<Row> elements) throws Exception {
-        Map<Long, Long> smallWindow = new HashMap<>();
-        for (Row row: elements) {
-            long time = DateUtils.parse(row.getField(timeField));
-            long start = TimeWindow.getWindowStartWithOffset(time, 0, windowSlide);
+        Map<Long, Long> smallWindow = new HashMap<>(8);
+        Iterator<Row> eleIter = elements.iterator();
+        long time;
+        long start;
+        Row row;
+        while (eleIter.hasNext()) {
+            row = eleIter.next();
+            time = DateUtils.parse(row.getField(timeField));
+            start = TimeWindow.getWindowStartWithOffset(time, 0, windowSlide);
             if (!smallWindow.containsKey(start)) {
                 smallWindow.put(start, 0L);
             }

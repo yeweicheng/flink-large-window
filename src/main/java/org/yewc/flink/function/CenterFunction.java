@@ -10,10 +10,7 @@ import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.Collector;
-import org.yewc.flink.entity.CountValueData;
-import org.yewc.flink.entity.DistinctValueData;
-import org.yewc.flink.entity.SumValueData;
-import org.yewc.flink.entity.ValueData;
+import org.yewc.flink.entity.*;
 import org.yewc.flink.util.DateUtils;
 
 import java.util.*;
@@ -27,18 +24,25 @@ public class CenterFunction extends KeyedProcessFunction<Row, Row, Row> {
     private boolean keepOldData;
     private Long windowUnix;
     private Long windowSlide;
+    private Long lateness;
     private int windowSplit;
     private int timeField;
     private JSONObject groupSchema;
     private JSONArray groupKey;
+    private JSONArray fieldKey;
 
     private Set<String> keyFlag;
     private Map<String, Integer> keyEmptyCount;
 
     public CenterFunction(boolean keepOldData, Long windowUnix, Long windowSlide, int timeField, String groupString) {
+        this(keepOldData, windowUnix, windowSlide, 0L, timeField, groupString);
+    }
+
+    public CenterFunction(boolean keepOldData, Long windowUnix, Long windowSlide, Long lateness, int timeField, String groupString) {
         this.keepOldData = keepOldData;
         this.windowUnix = windowUnix;
         this.windowSlide = windowSlide;
+        this.lateness = lateness == null ? 0L : lateness;
         this.windowSplit = new Long(windowUnix/windowSlide).intValue();
         this.timeField = timeField;
         this.groupSchema = JSONObject.parseObject(groupString);
@@ -52,7 +56,9 @@ public class CenterFunction extends KeyedProcessFunction<Row, Row, Row> {
     @Override
     public void open(Configuration parameters) throws Exception {
         ExecutionConfig ec = getRuntimeContext().getExecutionConfig();
-        ec.registerPojoType(DistinctValueData.class);
+        ec.registerPojoType(DistinctIntValueData.class);
+        ec.registerPojoType(DistinctLongValueData.class);
+        ec.registerPojoType(DistinctObjectValueData.class);
         ec.registerPojoType(CountValueData.class);
         ec.registerPojoType(SumValueData.class);
 
@@ -65,6 +71,8 @@ public class CenterFunction extends KeyedProcessFunction<Row, Row, Row> {
                     "valueState_" + typeAndField, ValueData.class));
             stateMap.put(typeAndField, state);
         }
+
+        fieldKey = groupSchema.getJSONArray("field");
 
         buffer = getRuntimeContext().getState(new ValueStateDescriptor<>("bufferState", List.class));
         waterMarkState = getRuntimeContext().getState(new ValueStateDescriptor<>("waterMarkState", Long.class));
@@ -112,12 +120,49 @@ public class CenterFunction extends KeyedProcessFunction<Row, Row, Row> {
         // 输出数据
         Long waterMark = waterMarkState.value();
         String dataKey = ctx.getCurrentKey().toString();
-        int size = groupKey.size();
-        Row row = new Row(2 + size);
-        row.setField(0, DateUtils.format(waterMark/1000 - 1));
-        row.setField(1, dataKey);
-        for (int i = 0; i < size; i++) {
-            row.setField(i + 2, stateMap.get(groupKey.getString(i)).value().getValue());
+        int groupSize = groupKey.size();
+        int fieldSize = fieldKey.size();
+        Row row = new Row(fieldSize + groupSize);
+        for (int i = 0; i < fieldSize; i++) {
+            String[] typeAndField = fieldKey.getString(i).split("_");
+            String type = typeAndField[0];
+            int field = -1;
+            if (typeAndField.length == 2) {
+                field = Integer.valueOf(typeAndField[1]);
+            }
+
+            switch (type) {
+                case "key":
+                    if (field == -1) {
+                        row.setField(i, dataKey);
+                    } else {
+                        row.setField(i, ctx.getCurrentKey().getField(field));
+                    }
+                    break;
+                case "starttime":
+                    if (field == 10) {
+                        row.setField(i, (waterMark - windowUnix)/1000);
+                    } else if (field == 13) {
+                        row.setField(i, waterMark - windowUnix);
+                    } else {
+                        row.setField(i, DateUtils.format((waterMark - windowUnix)/1000));
+                    }
+                    break;
+                case "endtime":
+                    if (field == 10) {
+                        row.setField(i, waterMark/1000 - 1);
+                    } else if (field == 13) {
+                        row.setField(i, waterMark - 1);
+                    } else {
+                        row.setField(i, DateUtils.format(waterMark/1000 - 1));
+                    }
+                    break;
+                default:
+                    throw new RuntimeException("unmatch key type");
+            }
+        }
+        for (int i = 0; i < groupSize; i++) {
+            row.setField(i + fieldSize, stateMap.get(groupKey.getString(i)).value().getValue());
         }
         out.collect(row);
         waterMark += windowSlide;
@@ -146,7 +191,7 @@ public class CenterFunction extends KeyedProcessFunction<Row, Row, Row> {
 
 //        System.out.println("onTimer trigger time: " + (waterMark));
         if (nextTrigger) {
-            ctx.timerService().registerProcessingTimeTimer(waterMark);
+            ctx.timerService().registerProcessingTimeTimer(waterMark + lateness);
         } else {
             keyEmptyCount.remove(dataKey);
             keyFlag.remove(dataKey);
@@ -159,6 +204,12 @@ public class CenterFunction extends KeyedProcessFunction<Row, Row, Row> {
         }
     }
 
+    /**
+     * 首次触发，不做输出操作
+     * @param ctx
+     * @return
+     * @throws Exception
+     */
     private boolean fristTrigger(OnTimerContext ctx) throws Exception {
         Long waterMark = waterMarkState.value();
         if (waterMark == null) {
@@ -176,19 +227,40 @@ public class CenterFunction extends KeyedProcessFunction<Row, Row, Row> {
             buffer.update(elements);
 
             // 首次触发
-            ctx.timerService().registerProcessingTimeTimer(waterMark);
+            ctx.timerService().registerProcessingTimeTimer(waterMark + lateness);
             return true;
         }
         return false;
     }
 
+    /**
+     * 处理多类state
+     * @param key
+     * @param current
+     * @param elements
+     * @throws Exception
+     */
     private void valueStateHandler(String key, ValueData current, List elements) throws Exception {
         if (current == null) {
-            String type = key.split("_")[0];
-            int fieldIndex = Integer.valueOf(key.split("_")[1]);
-            switch (type) {
+            String[] temp = key.split("_");
+            String groupType = temp[0];
+            String fieldType = null;
+            int fieldIndex;
+            if (temp.length == 2) {
+                fieldIndex = Integer.valueOf(temp[1]);
+            } else {
+                fieldType = temp[1];
+                fieldIndex = Integer.valueOf(temp[2]);
+            }
+            switch (groupType) {
                 case "distinct":
-                    current = new DistinctValueData(windowUnix, windowSlide, timeField, fieldIndex);
+                    if ("int".equals(fieldType)) {
+                        current = new DistinctIntValueData(windowUnix, windowSlide, timeField, fieldIndex);
+                    } else if ("long".equals(fieldType)) {
+                        current = new DistinctLongValueData(windowUnix, windowSlide, timeField, fieldIndex);
+                    } else {
+                        current = new DistinctObjectValueData(windowUnix, windowSlide, timeField, fieldIndex);
+                    }
                     break;
                 case "count":
                     current = new CountValueData(windowUnix, windowSlide, timeField, fieldIndex);
@@ -197,7 +269,7 @@ public class CenterFunction extends KeyedProcessFunction<Row, Row, Row> {
                     current = new SumValueData(windowUnix, windowSlide, timeField, fieldIndex);
                     break;
                 default:
-                    throw new RuntimeException("unmatch group type of <" + type + ">");
+                    throw new RuntimeException("unmatch group type of <" + groupType + ">");
             }
         }
 
