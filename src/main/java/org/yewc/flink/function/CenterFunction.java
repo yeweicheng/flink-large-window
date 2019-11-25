@@ -15,6 +15,10 @@ import org.yewc.flink.util.DateUtils;
 
 import java.util.*;
 
+/**
+ * use org.yewc.flink.function.GlobalFunction
+ */
+@Deprecated
 public class CenterFunction extends KeyedProcessFunction<Row, Row, Row> {
 
     private Map<String, ValueState<ValueData>> stateMap;

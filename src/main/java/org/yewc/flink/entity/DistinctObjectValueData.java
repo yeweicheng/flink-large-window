@@ -39,25 +39,28 @@ public class DistinctObjectValueData extends ValueData {
             smallWindow.get(start).add(row.getField(theField));
         }
 
-        Iterator<Long> item = smallWindow.keySet().iterator();
+        Iterator<Map.Entry<Long, Set<Object>>> item = smallWindow.entrySet().iterator();
         while(item.hasNext()){
-            Long key = item.next();
+            Map.Entry<Long, Set<Object>> kv = item.next();
+            Long key = kv.getKey();
+            Set<Object> data = kv.getValue();
             if (globalWindow.containsKey(key)) {
-                globalWindow.get(key).addAll(smallWindow.get(key));
+                globalWindow.get(key).addAll(data);
             } else {
-                globalWindow.put(key, smallWindow.get(key));
+                globalWindow.put(key, data);
             }
         }
 
         value.clear();
 
         List<Long> removeKey = new ArrayList<>();
-        item = globalWindow.keySet().iterator();
+        item = globalWindow.entrySet().iterator();
         while (item.hasNext()) {
-            Long key = item.next();
+            Map.Entry<Long, Set<Object>> kv = item.next();
+            Long key = kv.getKey();
             int bt = (int) ((lastWindow - key)/windowSlide);
             if (bt >= 1 && bt <= windowSplit) {
-                value.addAll(globalWindow.get(key));
+                value.addAll(kv.getValue());
             } else if (bt > windowSplit) {
                 removeKey.add(key);
             }

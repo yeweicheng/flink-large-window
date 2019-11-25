@@ -43,25 +43,28 @@ public class CountValueData extends ValueData {
             }
         }
 
-        Iterator<Long> item = smallWindow.keySet().iterator();
+        Iterator<Map.Entry<Long, Long>> item = smallWindow.entrySet().iterator();
         while(item.hasNext()){
-            Long key = item.next();
+            Map.Entry<Long, Long> kv = item.next();
+            Long key = kv.getKey();
+            Long data = kv.getValue();
             if (globalWindow.containsKey(key)) {
-                globalWindow.put(key, globalWindow.get(key) + smallWindow.get(key));
+                globalWindow.put(key, globalWindow.get(key) + data);
             } else {
-                globalWindow.put(key, smallWindow.get(key));
+                globalWindow.put(key, data);
             }
         }
 
         value = 0L;
 
         List<Long> removeKey = new ArrayList<>();
-        item = globalWindow.keySet().iterator();
+        item = globalWindow.entrySet().iterator();
         while (item.hasNext()) {
-            Long key = item.next();
+            Map.Entry<Long, Long> kv = item.next();
+            Long key = kv.getKey();
             int bt = (int) ((lastWindow - key)/windowSlide);
             if (bt >= 1 && bt <= windowSplit) {
-                value += globalWindow.get(key);
+                value += kv.getValue();
             } else if (bt > windowSplit) {
                 removeKey.add(key);
             }

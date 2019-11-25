@@ -42,25 +42,28 @@ public class DistinctLongValueData extends ValueData {
         }
 
         // 合并全局数据
-        Iterator<Long> item = smallWindow.keySet().iterator();
+        Iterator<Map.Entry<Long, Roaring64NavigableMap>> item = smallWindow.entrySet().iterator();
         while(item.hasNext()){
-            Long key = item.next();
+            Map.Entry<Long, Roaring64NavigableMap> kv = item.next();
+            Long key = kv.getKey();
+            Roaring64NavigableMap data = kv.getValue();
             if (globalWindow.containsKey(key)) {
-                globalWindow.get(key).or(smallWindow.get(key));
+                globalWindow.get(key).or(data);
             } else {
-                globalWindow.put(key, smallWindow.get(key));
+                globalWindow.put(key, data);
             }
         }
 
         // 计算当前窗口
         value.clear();
         List<Long> removeKey = new ArrayList<>();
-        item = globalWindow.keySet().iterator();
+        item = globalWindow.entrySet().iterator();
         while (item.hasNext()) {
-            Long key = item.next();
+            Map.Entry<Long, Roaring64NavigableMap> kv = item.next();
+            Long key = kv.getKey();
             int bt = (int) ((lastWindow - key)/windowSlide);
             if (bt >= 1 && bt <= windowSplit) {
-                value.or(globalWindow.get(key));
+                value.or(kv.getValue());
             } else if (bt > windowSplit) {
                 removeKey.add(key);
             }

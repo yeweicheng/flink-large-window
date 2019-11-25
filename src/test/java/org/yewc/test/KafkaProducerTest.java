@@ -25,10 +25,10 @@ public class KafkaProducerTest {
         Random random = new Random();
 
         while (true) {
-            Thread.sleep(100);
+            Thread.sleep(10);
             int value = random.nextInt(10000);
             JSONObject jo = new JSONObject();
-            jo.put("c1", abc[random.nextInt(26)]);
+            jo.put("c1", abc[random.nextInt(26)] + abc[random.nextInt(26)]);
             jo.put("c2", random.nextInt(3));
             jo.put("c3", Long.valueOf(value));
             jo.put("c4", System.currentTimeMillis());

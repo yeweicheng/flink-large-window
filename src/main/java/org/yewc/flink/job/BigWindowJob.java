@@ -9,12 +9,14 @@ import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.java.StreamTableEnvironment;
 import org.apache.flink.table.runtime.RowKeySelector;
 import org.apache.flink.table.typeutils.TimeIndicatorTypeInfo;
 import org.apache.flink.types.Row;
 import org.yewc.flink.function.CenterFunction;
+import org.yewc.flink.function.GlobalFunction;
 import org.yewc.flink.watermark.EventWatermark;
 
 import java.util.Map;
@@ -62,6 +64,14 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
         }
         final KeySelector keySelector = new RowKeySelector(keyIndexes, TypeInformation.of(Row.class));
 
+        final String executeMode = params.getOrDefault("mode", "global");
+        KeyedProcessFunction processFunction;
+        if ("center".equals(executeMode)) {
+            processFunction = new CenterFunction(keepOldData, windowSize, slideSize, lateness, timeField, groupString);
+        } else {
+            processFunction = new GlobalFunction(keepOldData, windowSize, slideSize, lateness, timeField, groupString);
+        }
+
         DataStream sourceDataStream = getInputTable(inputTableName, inputTableType);
 
         // 执行
@@ -69,7 +79,7 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
                 .map((v) -> v instanceof Tuple2 ? ((Tuple2) v).f1 : v) // 中间表的情况
                 .assignTimestampsAndWatermarks(new EventWatermark(timeField))
                 .keyBy(keySelector)
-                .process(new CenterFunction(keepOldData, windowSize, slideSize, lateness, timeField, groupString))
+                .process(processFunction)
                 .returns(Types.ROW(getReturnTypes(groupString, inputTableName, inputTableType)));
 
         toOutputTable(windowStream, outputTableName, outputTableType, String.join(",", getReturnFields(groupString)));
