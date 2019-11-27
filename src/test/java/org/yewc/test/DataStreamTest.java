@@ -20,6 +20,7 @@ import org.apache.flink.table.runtime.RowKeySelector;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.Collector;
 import org.yewc.flink.function.CenterFunction;
+import org.yewc.flink.function.GlobalFunction;
 import org.yewc.flink.watermark.EventWatermark;
 
 import javax.xml.crypto.Data;
@@ -36,6 +37,7 @@ public class DataStreamTest {
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         StreamTableEnvironment ste = StreamTableEnvironment.create(env);
         env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime);
+        env.setParallelism(1);
 
         Properties properties = new Properties();
         properties.setProperty("bootstrap.servers", "10.16.6.191:9092");
@@ -50,9 +52,10 @@ public class DataStreamTest {
 
         final Long windowSize = 5*60000L;
         final Long slideSize = 60000L;
+        final Long lateness = 10000L;
 
         final int timeField = 3;
-        final String groupString = "{\"field\": [\"key\", \"starttime_10\", \"endtime\"], " +
+        final String groupString = "{\"field\": [\"key\", \"endtime\"], " +
                 "\"group\": [\"distinct_1\", \"distinct_long_2\", \"distinct_int_1\", \"count_1\"]}";
 
         final boolean keepOldData = false;
@@ -72,10 +75,10 @@ public class DataStreamTest {
                                 }
                                 return v;
                         })
-                        .assignTimestampsAndWatermarks(new EventWatermark(timeField))
+//                        .assignTimestampsAndWatermarks(new EventWatermark(timeField))
                         .keyBy(keySelector)
-                        .process(new CenterFunction(keepOldData, windowSize, slideSize, timeField, groupString))
-                        .returns(Types.ROW(Types.STRING, Types.LONG, Types.STRING, Types.LONG, Types.LONG, Types.LONG, Types.LONG));
+                        .process(new GlobalFunction(keepOldData, windowSize, slideSize, lateness, timeField, groupString, false))
+                        .returns(Types.ROW(Types.STRING, Types.STRING, Types.LONG, Types.LONG, Types.LONG, Types.LONG));
 
 
         counts.print();

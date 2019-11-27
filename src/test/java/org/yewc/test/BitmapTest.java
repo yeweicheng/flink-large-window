@@ -1,5 +1,6 @@
 package org.yewc.test;
 
+import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
 import org.roaringbitmap.RoaringBitmap;
 import org.roaringbitmap.longlong.Roaring64NavigableMap;
 
@@ -12,27 +13,7 @@ import java.util.concurrent.CompletableFuture;
 public class BitmapTest {
 
     public static void main(String[] args) throws Exception {
-        long s = System.currentTimeMillis();
-        for (int j = 0; j < 10000; j++) {
-//            Roaring64NavigableMap all = new Roaring64NavigableMap();
-//            List<Roaring64NavigableMap> children = new ArrayList<>();
-//            for (int i = 0; i < 100; i++) {
-//                Roaring64NavigableMap current = new Roaring64NavigableMap();
-//                current.add(i + 100000000);
-//                children.add(current);
-//                all.or(current);
-////                all.add(i + 100000000);
-//            }
-            Set<Integer> all = new HashSet<>();
-            for (int i = 0; i < 100; i++) {
-                Set<Integer> dataSet = new HashSet<>();
-                dataSet.add(i);
-                all.addAll(dataSet);
-            }
-        }
-        long e = System.currentTimeMillis();
-        System.out.println(e - s);
-//        System.out.println(all.getLongSizeInBytes());
+        System.out.println(TimeWindow.getWindowStartWithOffset(1574761559986L, 0, 60000));
     }
 
     public static void main1(String[] args) throws Exception {

@@ -22,6 +22,7 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Row> {
     private ValueState<Long> waterMarkState;
 
     private boolean keepOldData;
+    private boolean batch;
     private Long windowUnix;
     private Long windowSlide;
     private Long lateness;
@@ -34,12 +35,15 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Row> {
     private Set<String> keyFlag;
     private Map<String, Integer> keyEmptyCount;
 
-    public GlobalFunction(boolean keepOldData, Long windowUnix, Long windowSlide, int timeField, String groupString) {
-        this(keepOldData, windowUnix, windowSlide, 0L, timeField, groupString);
+    public GlobalFunction(boolean keepOldData, Long windowUnix, Long windowSlide,
+                          int timeField, String groupString, boolean batch) {
+        this(keepOldData, windowUnix, windowSlide, 0L, timeField, groupString, batch);
     }
 
-    public GlobalFunction(boolean keepOldData, Long windowUnix, Long windowSlide, Long lateness, int timeField, String groupString) {
+    public GlobalFunction(boolean keepOldData, Long windowUnix, Long windowSlide, Long lateness,
+                          int timeField, String groupString, boolean batch) {
         this.keepOldData = keepOldData;
+        this.batch = batch;
         this.windowUnix = windowUnix;
         this.windowSlide = windowSlide;
         this.lateness = lateness == null ? 0L : lateness;
@@ -71,22 +75,27 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Row> {
     }
 
     @Override
-    public void processElement(Row tuple, Context ctx, Collector<Row> out) throws Exception {
-        List elements = buffer.value();
-        if (elements == null) {
-            elements = new ArrayList<Row>(5);
-        }
+    public void processElement(Row row, Context ctx, Collector<Row> out) throws Exception {
+        if (batch) {
+            List elements = buffer.value();
+            if (elements == null) {
+                elements = new ArrayList<Row>();
+            }
 
-        elements.add(tuple);
-        buffer.update(elements);
+            elements.add(row);
+            buffer.update(elements);
+        } else {
+            valueStateHandler(row);
+        }
 
         if (!keyFlag.contains(ctx.getCurrentKey().toString())) {
             Long waterMark = waterMarkState.value();
             if (waterMark == null) {
-                waterMark = ctx.timerService().currentWatermark() > 0 ? ctx.timerService().currentWatermark() : 0;
+                waterMark = TimeWindow.getWindowStartWithOffset(DateUtils.parse(row.getField(timeField)), 0, windowSlide) + windowSlide;
+                waterMarkState.update(waterMark);
             }
-
-            ctx.timerService().registerProcessingTimeTimer(waterMark);
+            // 首次触发
+            ctx.timerService().registerProcessingTimeTimer(waterMark + lateness);
             keyFlag.add(ctx.getCurrentKey().toString());
         }
     }
@@ -94,13 +103,9 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Row> {
     @Override
     public void onTimer(long timestamp, OnTimerContext ctx, Collector<Row> out) throws Exception {
 
-        if (fristTrigger(ctx)) {
-            return;
-        }
-
         // 遍历需要聚合数据字段
         List elements = buffer.value();
-        valueStateHandler(elements);
+        GlobalValueData current = valueStateHandler(elements);
 
         // 输出数据
         Long waterMark = waterMarkState.value();
@@ -147,7 +152,7 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Row> {
             }
         }
 
-        Object[] result = (Object[]) valueData.value().getValue();
+        Object[] result = (Object[]) current.getValue();
         for (int i = 0; i < result.length; i++) {
             row.setField(i + fieldSize, result[i]);
         }
@@ -158,7 +163,7 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Row> {
         // 判断是否需要清理长时间没有数据的旧key
         boolean nextTrigger = true;
         if (!keepOldData) {
-            if (elements.isEmpty()) {
+            if (current.isEmptyFlag()) {
                 if (!keyEmptyCount.containsKey(dataKey)) {
                     keyEmptyCount.put(dataKey, 0);
                 }
@@ -171,10 +176,14 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Row> {
             } else {
                 keyEmptyCount.remove(dataKey);
             }
+            current.setEmptyFlag(true);
         }
+        valueData.update(current);
 
-        elements.clear();
-        buffer.update(elements);
+        if (batch) {
+            elements.clear();
+            buffer.update(elements);
+        }
 
 //        System.out.println("onTimer trigger time: " + (waterMark));
         if (nextTrigger) {
@@ -183,37 +192,13 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Row> {
             keyEmptyCount.remove(dataKey);
             keyFlag.remove(dataKey);
 
-            buffer.update(null);
             waterMarkState.update(null);
             valueData.update(null);
+
+            if (batch) {
+                buffer.update(null);
+            }
         }
-    }
-
-    /**
-     * 首次触发，不做输出操作
-     * @param ctx
-     * @return
-     * @throws Exception
-     */
-    private boolean fristTrigger(OnTimerContext ctx) throws Exception {
-        Long waterMark = waterMarkState.value();
-        if (waterMark == null) {
-            waterMark = ctx.timerService().currentWatermark() > 0 ? ctx.timerService().currentWatermark() : System.currentTimeMillis();
-            waterMark = TimeWindow.getWindowStartWithOffset(waterMark, 0, windowSlide) + windowSlide;
-            waterMarkState.update(waterMark);
-
-            // 遍历需要聚合数据字段
-            List elements = buffer.value();
-            valueStateHandler(elements);
-
-            elements.clear();
-            buffer.update(elements);
-
-            // 首次触发
-            ctx.timerService().registerProcessingTimeTimer(waterMark + lateness);
-            return true;
-        }
-        return false;
     }
 
     /**
@@ -221,15 +206,26 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Row> {
      * @param elements
      * @throws Exception
      */
-    private void valueStateHandler(List elements) throws Exception {
+    private GlobalValueData valueStateHandler(List elements) throws Exception {
         GlobalValueData current = valueData.value();
         if (current == null) {
-            current = new GlobalValueData(windowUnix, windowSlide, timeField, -1);
-            current.init(groupKey);
+            current = new GlobalValueData(windowUnix, windowSlide, timeField, groupKey);
         }
 
         current.lastWindow = waterMarkState.value();
-        current.putElements(elements);
+        if (batch) {
+            current.putElements(elements);
+        }
+        return current;
+    }
+
+    private void valueStateHandler(Row row) throws Exception {
+        GlobalValueData current = valueData.value();
+        if (current == null) {
+            current = new GlobalValueData(windowUnix, windowSlide, timeField, groupKey);
+        }
+
+        current.putElement(row);
         valueData.update(current);
     }
 }

@@ -36,20 +36,28 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
         this.streamTableEnvironment = streamTableEnvironment;
         this.brsExecutionDataFlow = brsExecutionDataFlow;
 
+        // 输入数据的Table和来源类型
         final String inputTableName = params.get("input.table.name");
         final String inputTableType = params.getOrDefault("input.table.type", "source");
+
+        // 输出数据的Table和来源类型
         final String outputTableName = params.get("output.table.name");
         final String outputTableType = params.getOrDefault("output.table.type", "sink");
 
+        // 窗口大小和滑动大小
         final Long windowSize = Long.valueOf(params.get("window.size"));
         final Long slideSize = Long.valueOf(params.get("slide.size"));
         if (slideSize > windowSize) {
             throw new RuntimeException("invalid sliding time and window time");
         }
+
+        // 延迟触发时长
         final Long lateness = Long.valueOf(params.getOrDefault("lateness", "0"));
 
+        // watermark选用的字段
         final int timeField = Integer.valueOf(params.get("time.field"));
 
+        // 是否保留旧数据输出
         final boolean keepOldData = Boolean.valueOf(params.getOrDefault("keep.old.data", "false"));
 
         // 字段类型返回
@@ -64,24 +72,27 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
         }
         final KeySelector keySelector = new RowKeySelector(keyIndexes, TypeInformation.of(Row.class));
 
-        final String executeMode = params.getOrDefault("mode", "global");
+        final String executeMode = params.getOrDefault("processor.mode", "global");
         KeyedProcessFunction processFunction;
         if ("center".equals(executeMode)) {
             processFunction = new CenterFunction(keepOldData, windowSize, slideSize, lateness, timeField, groupString);
         } else {
-            processFunction = new GlobalFunction(keepOldData, windowSize, slideSize, lateness, timeField, groupString);
+            final boolean batch = Boolean.valueOf(params.getOrDefault("batch.mode", "false"));
+            processFunction = new GlobalFunction(keepOldData, windowSize, slideSize, lateness, timeField, groupString, batch);
         }
 
+        // 输入源
         DataStream sourceDataStream = getInputTable(inputTableName, inputTableType);
 
         // 执行
         DataStream<Row> windowStream = sourceDataStream
                 .map((v) -> v instanceof Tuple2 ? ((Tuple2) v).f1 : v) // 中间表的情况
-                .assignTimestampsAndWatermarks(new EventWatermark(timeField))
+//                .assignTimestampsAndWatermarks(new EventWatermark(timeField))
                 .keyBy(keySelector)
                 .process(processFunction)
                 .returns(Types.ROW(getReturnTypes(groupString, inputTableName, inputTableType)));
 
+        // 输出源
         toOutputTable(windowStream, outputTableName, outputTableType, String.join(",", getReturnFields(groupString)));
     }
 

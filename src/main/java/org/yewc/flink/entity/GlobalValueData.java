@@ -10,28 +10,31 @@ import org.yewc.flink.util.DateUtils;
 
 import java.util.*;
 
-public class GlobalValueData extends ValueData {
+public class GlobalValueData {
 
-    public Object[] value;
-    public Object[] empty;
-    public int[] fieldIndexes;
-    public Map<Long, Object[]> globalWindow;
+    public Long lastWindow;
+    public Long windowUnix;
+    public Long windowSlide;
+    public Long lateness;
+    public int windowSplit;
+    public int timeField;
+    private Object[] emptyValue;
+    private boolean emptyFlag;
+    private int[] fieldIndexes;
+    private Map<Long, Object[]> globalWindow;
 
-    public GlobalValueData(Long windowUnix, Long windowSlide, Long lateness, int timeField, int theField) {
-        super(windowUnix, windowSlide, lateness, timeField, theField);
-    }
+    public GlobalValueData(Long windowUnix, Long windowSlide, Long lateness, int timeField, JSONArray groupKey) {
+        this.windowUnix = windowUnix;
+        this.windowSlide = windowSlide;
+        this.lateness = lateness;
+        this.timeField = timeField;
+        this.windowSplit = new Long(windowUnix/windowSlide).intValue();
 
-    public GlobalValueData(Long windowUnix, Long windowSlide, int timeField, int theField) {
-        super(windowUnix, windowSlide, 0L, timeField, theField);
-    }
-
-    public void init(JSONArray groupKey) {
-        this.value = new Object[groupKey.size()];
         this.globalWindow = new HashMap<>();
-
-        this.empty = new Object[groupKey.size()];
+        this.emptyFlag = true;
+        this.emptyValue = new Object[groupKey.size()];
         this.fieldIndexes = new int[groupKey.size()];
-        for (int i = 0; i < empty.length; i++) {
+        for (int i = 0; i < emptyValue.length; i++) {
             String[] temp = groupKey.getString(i).split("_");
             String groupType = temp[0];
             String fieldType = null;
@@ -47,87 +50,59 @@ public class GlobalValueData extends ValueData {
             switch (groupType) {
                 case "distinct":
                     if ("int".equals(fieldType)) {
-                        empty[i] = new RoaringBitmap();
+                        emptyValue[i] = new RoaringBitmap();
                     } else if ("long".equals(fieldType)) {
-                        empty[i] = new Roaring64NavigableMap();
+                        emptyValue[i] = new Roaring64NavigableMap();
                     } else {
-                        empty[i] = new HashSet<Object>();
+                        emptyValue[i] = new HashSet<Object>();
                     }
                     break;
                 case "count":
-                    empty[i] = 0L;
+                    emptyValue[i] = 0L;
                     break;
                 case "sum":
-                    empty[i] = 0.0;
+                    emptyValue[i] = 0.0;
                     break;
                 default:
                     throw new RuntimeException("unmatch group type of <" + groupType + ">");
             }
         }
-
     }
 
-    @Override
+    public GlobalValueData(Long windowUnix, Long windowSlide, int timeField, JSONArray groupKey) {
+        this(windowUnix, windowSlide, 0L, timeField, groupKey);
+    }
+
+    public void putElement(Row row) throws Exception {
+        long time = DateUtils.parse(row.getField(timeField));
+        long start = TimeWindow.getWindowStartWithOffset(time, 0, windowSlide);
+        if (!globalWindow.containsKey(start)) {
+            globalWindow.put(start, cloneEmpty(emptyValue));
+        }
+
+        Object[] data = globalWindow.get(start);
+        for (int i = 0; i < data.length; i++) {
+            Object fieldData = row.getField(fieldIndexes[i]);
+            data[i] = handleData(data[i], fieldData, false);
+        }
+
+        if (emptyFlag) {
+            emptyFlag = false;
+        }
+    }
+
     public void putElements(Iterable<Row> elements) throws Exception {
-        Map<Long, Object[]> smallWindow = new HashMap<>(8);
         Iterator<Row> eleIter = elements.iterator();
-        long time;
-        long start;
-        Row row;
         while (eleIter.hasNext()) {
-            row = eleIter.next();
-            time = DateUtils.parse(row.getField(timeField));
-            start = TimeWindow.getWindowStartWithOffset(time, 0, windowSlide);
-            if (!smallWindow.containsKey(start)) {
-                smallWindow.put(start, empty.clone());
-            }
-
-            Object[] data = smallWindow.get(start);
-            for (int i = 0; i < data.length; i++) {
-                Object fieldData = row.getField(fieldIndexes[i]);
-                if (fieldData != null) {
-                    Object result = data[i];
-                    if (result instanceof RoaringBitmap) {
-                        ((RoaringBitmap) result).add((Integer) fieldData);
-                    } else if (result instanceof Roaring64NavigableMap) {
-                        ((Roaring64NavigableMap) result).add((Long) fieldData);
-                    } else if (result instanceof Long) {
-                        data[i] = ((Long) result) + 1;
-                    } else if (result instanceof Double) {
-                        data[i] = ((Double) result) + Double.valueOf(fieldData.toString());
-                    }
-                }
-            }
+            putElement(eleIter.next());
         }
+    }
 
-        Iterator<Map.Entry<Long, Object[]>> item = smallWindow.entrySet().iterator();
-        while(item.hasNext()){
-            Map.Entry<Long, Object[]> kv = item.next();
-            Long key = kv.getKey();
-            Object[] data = kv.getValue();
-            if (globalWindow.containsKey(key)) {
-                Object[] globalData = globalWindow.get(key);
-                for (int i = 0; i < data.length; i++) {
-                    Object result = data[i];
-                    if (result instanceof RoaringBitmap) {
-                        ((RoaringBitmap) globalData[i]).or((RoaringBitmap) result);
-                    } else if (result instanceof Roaring64NavigableMap) {
-                        ((Roaring64NavigableMap) globalData[i]).or((Roaring64NavigableMap) result);
-                    } else if (result instanceof Long) {
-                        globalData[i] = ((Long) globalData[i]) + ((Long) result);
-                    } else if (result instanceof Double) {
-                        globalData[i] = ((Double) globalData[i]) + ((Double) result);
-                    }
-                }
-            } else {
-                globalWindow.put(key, data);
-            }
-        }
-
-        value = empty.clone();
+    public Object getValue() throws Exception {
+        Object[] value = cloneEmpty(emptyValue);
 
         List<Long> removeKey = new ArrayList<>();
-        item = globalWindow.entrySet().iterator();
+        Iterator<Map.Entry<Long, Object[]>> item = globalWindow.entrySet().iterator();
         while (item.hasNext()) {
             Map.Entry<Long, Object[]> kv = item.next();
             Long key = kv.getKey();
@@ -135,16 +110,7 @@ public class GlobalValueData extends ValueData {
             if (bt >= 1 && bt <= windowSplit) {
                 Object[] data = kv.getValue();
                 for (int i = 0; i < data.length; i++) {
-                    Object result = data[i];
-                    if (result instanceof RoaringBitmap) {
-                        ((RoaringBitmap) value[i]).or((RoaringBitmap) result);
-                    } else if (result instanceof Roaring64NavigableMap) {
-                        ((Roaring64NavigableMap) value[i]).or((Roaring64NavigableMap) result);
-                    } else if (result instanceof Long) {
-                        value[i] = ((Long) value[i]) + ((Long) result);
-                    } else if (result instanceof Double) {
-                        value[i] = ((Double) value[i]) + ((Double) result);
-                    }
+                    value[i] = handleData(value[i], data[i], true);
                 }
             } else if (bt > windowSplit) {
                 removeKey.add(key);
@@ -154,10 +120,7 @@ public class GlobalValueData extends ValueData {
         for (int i = 0; i < removeKey.size(); i++) {
             globalWindow.remove(removeKey.get(i));
         }
-    }
 
-    @Override
-    public Object getValue() throws Exception {
         Object[] data = new Object[value.length];
         for (int i = 0; i < data.length; i++) {
             Object result = value[i];
@@ -165,10 +128,85 @@ public class GlobalValueData extends ValueData {
                 data[i] = ((RoaringBitmap) result).getLongCardinality();
             } else if (result instanceof Roaring64NavigableMap) {
                 data[i] = ((Roaring64NavigableMap) result).getLongCardinality();
-            } else {
+            } else if (result instanceof HashSet) {
+                data[i] = new Long(((HashSet) result).size());
+            } else if (result instanceof Long) {
                 data[i] = result;
+            } else if (result instanceof Double) {
+                data[i] = result;
+            } else {
+                throw new RuntimeException("can not get value this class -> " + result.getClass());
             }
         }
         return data;
+    }
+
+    private Object handleData(Object oldData, Object newData, boolean batch) {
+        if (newData != null) {
+            if (oldData instanceof RoaringBitmap) {
+                if (batch) {
+                    ((RoaringBitmap) oldData).or((RoaringBitmap) newData);
+                } else {
+                    ((RoaringBitmap) oldData).add((Integer) newData);
+                }
+            } else if (oldData instanceof Roaring64NavigableMap) {
+                if (batch) {
+                    ((Roaring64NavigableMap) oldData).or((Roaring64NavigableMap) newData);
+                } else {
+                    ((Roaring64NavigableMap) oldData).add((Long) newData);
+                }
+            } else if (oldData instanceof HashSet) {
+                if (batch) {
+                    ((HashSet) oldData).addAll((HashSet) newData);
+                } else {
+                    ((HashSet) oldData).add(newData);
+                }
+            } else if (oldData instanceof Long) {
+                if (batch) {
+                    oldData = ((Long) oldData) + new Long(newData.toString());
+                } else {
+                    oldData = ((Long) oldData) + 1;
+                }
+            } else if (oldData instanceof Double) {
+                if (batch) {
+                    oldData = ((Double) oldData) + ((Double) newData);
+                } else {
+                    oldData = ((Double) oldData) + Double.valueOf(newData.toString());
+                }
+            } else {
+                throw new RuntimeException("can not handle this class -> " + oldData.getClass());
+            }
+        }
+        return oldData;
+    }
+
+    private Object[] cloneEmpty(Object... os) {
+        Object[] newOs = new Object[os.length];
+        for (int i = 0; i < os.length; i++) {
+            Object temp = os[i];
+            if (temp instanceof RoaringBitmap) {
+                newOs[i] = new RoaringBitmap();
+            } else if (temp instanceof Roaring64NavigableMap) {
+                newOs[i] = new Roaring64NavigableMap();
+            } else if (temp instanceof HashSet) {
+                newOs[i] = new HashSet<Object>();
+            } else if (temp instanceof Long) {
+                newOs[i] = 0L;
+            } else if (temp instanceof Double) {
+                newOs[i] = 0.0;
+            } else {
+                throw new RuntimeException("can not clone this class -> " + temp.getClass());
+            }
+        }
+
+        return newOs;
+    }
+
+    public boolean isEmptyFlag() {
+        return emptyFlag;
+    }
+
+    public void setEmptyFlag(boolean emptyFlag) {
+        this.emptyFlag = emptyFlag;
     }
 }
