@@ -7,6 +7,10 @@ import org.yewc.flink.util.DateUtils;
 
 import java.util.*;
 
+/**
+ * use org.yewc.flink.entity.GlobalValueData
+ */
+@Deprecated
 public class DistinctIntValueData extends ValueData {
 
     public RoaringBitmap value;

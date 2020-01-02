@@ -10,12 +10,15 @@ import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.utils.ParameterTool;
+import org.apache.flink.contrib.streaming.state.RocksDBStateBackend;
+import org.apache.flink.streaming.api.CheckpointingMode;
 import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer;
 import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.java.StreamTableEnvironment;
+import org.apache.flink.table.functions.DistinctAggregateFunction;
 import org.apache.flink.table.runtime.RowKeySelector;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.Collector;
@@ -31,12 +34,16 @@ public class DataStreamTest {
 
     public static void main(String[] args) throws Exception {
 
+        System.setProperty("HADOOP_USER_NAME", "hadoop");
+
         final ParameterTool params = ParameterTool.fromArgs(args);
 
         // set up the execution environment
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         StreamTableEnvironment ste = StreamTableEnvironment.create(env);
         env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime);
+        env.setStateBackend(new RocksDBStateBackend("hdfs://10.16.6.185:8020/flink/flink-rocksdb"));
+        env.enableCheckpointing(60000, CheckpointingMode.EXACTLY_ONCE);
         env.setParallelism(1);
 
         Properties properties = new Properties();
@@ -77,9 +84,8 @@ public class DataStreamTest {
                         })
 //                        .assignTimestampsAndWatermarks(new EventWatermark(timeField))
                         .keyBy(keySelector)
-                        .process(new GlobalFunction(keepOldData, windowSize, slideSize, lateness, timeField, groupString, false))
+                        .process(new GlobalFunction(keepOldData, windowSize, slideSize, lateness, timeField, groupString, false, false))
                         .returns(Types.ROW(Types.STRING, Types.STRING, Types.LONG, Types.LONG, Types.LONG, Types.LONG));
-
 
         counts.print();
         env.execute("WindowWordCount");

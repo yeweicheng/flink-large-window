@@ -94,6 +94,7 @@ dependencies {
     flinkShadowJar group: 'com.github.jsqlparser', name: 'jsqlparser', version: '2.0'
     flinkShadowJar group: 'org.apache.commons', name: 'commons-jexl3', version: '3.1'
     flinkShadowJar group: 'org.apache.flink', name: 'flink-test-utils_2.11', version: '1.8.0'
+    flinkShadowJar group: 'org.apache.flink', name: 'flink-cep_2.11', version: '1.8.0'
 
     flinkShadowJar(files('C:\\Users\\barneyye\\IdeaProjects\\flink-kudu-sink\\build\\libs\\flink-kudu-sink-1.0-SNAPSHOT.jar'))
     flinkShadowJar(files('C:\\Users\\barneyye\\Downloads\\flink-executor-local.jar'))

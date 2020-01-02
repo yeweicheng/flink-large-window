@@ -19,6 +19,7 @@ public class GlobalValueData {
     public int windowSplit;
     public int timeField;
     private Object[] emptyValue;
+    private Object[] value;
     private boolean emptyFlag;
     private int[] fieldIndexes;
     private Map<Long, Object[]> globalWindow;
@@ -98,19 +99,41 @@ public class GlobalValueData {
         }
     }
 
-    public Object getValue() throws Exception {
-        Object[] value = cloneEmpty(emptyValue);
+    /**
+     * 不管有没新数据都输出
+     * @param alwaysCalculate
+     * @return
+     * @throws Exception
+     */
+    public Object getValue(boolean alwaysCalculate) throws Exception {
+        // 如果没有最新分片的数据和要去除的数据，直接返回缓存值
+        if (emptyFlag) {
+            if (alwaysCalculate) {
+                if (value != null && !globalWindow.containsKey(lastWindow - windowSlide) &&
+                        !globalWindow.containsKey(lastWindow - windowSlide * (windowSplit + 1))) {
+                    return value;
+                }
+            } else {
+                if (!globalWindow.containsKey(lastWindow - windowSlide) &&
+                        !globalWindow.containsKey(lastWindow - windowSlide * (windowSplit + 1))) {
+                    return null;
+                }
+            }
+        }
+
+        Object[] tempValue = cloneEmpty(emptyValue);
 
         List<Long> removeKey = new ArrayList<>();
         Iterator<Map.Entry<Long, Object[]>> item = globalWindow.entrySet().iterator();
         while (item.hasNext()) {
             Map.Entry<Long, Object[]> kv = item.next();
             Long key = kv.getKey();
+            // 获取每个分片是否在总窗口范围内，超出或未来的均忽略
             int bt = (int) ((lastWindow - key)/windowSlide);
             if (bt >= 1 && bt <= windowSplit) {
                 Object[] data = kv.getValue();
                 for (int i = 0; i < data.length; i++) {
-                    value[i] = handleData(value[i], data[i], true);
+                    tempValue[i] = handleData(tempValue[i], data[i], true);
                 }
             } else if (bt > windowSplit) {
                 removeKey.add(key);
@@ -121,24 +144,28 @@ public class GlobalValueData {
             globalWindow.remove(removeKey.get(i));
         }
 
-        Object[] data = new Object[value.length];
-        for (int i = 0; i < data.length; i++) {
-            Object result = value[i];
+        Object[] value = new Object[tempValue.length];
+        for (int i = 0; i < value.length; i++) {
+            Object result = tempValue[i];
             if (result instanceof RoaringBitmap) {
-                data[i] = ((RoaringBitmap) result).getLongCardinality();
+                value[i] = ((RoaringBitmap) result).getLongCardinality();
             } else if (result instanceof Roaring64NavigableMap) {
-                data[i] = ((Roaring64NavigableMap) result).getLongCardinality();
+                value[i] = ((Roaring64NavigableMap) result).getLongCardinality();
             } else if (result instanceof HashSet) {
-                data[i] = new Long(((HashSet) result).size());
+                value[i] = new Long(((HashSet) result).size());
             } else if (result instanceof Long) {
-                data[i] = result;
+                value[i] = result;
             } else if (result instanceof Double) {
-                data[i] = result;
+                value[i] = result;
             } else {
                 throw new RuntimeException("can not get value this class -> " + result.getClass());
             }
         }
-        return data;
+
+        if (alwaysCalculate) {
+            this.value = value;
+        }
+        return value;
     }
 
     private Object handleData(Object oldData, Object newData, boolean batch) {

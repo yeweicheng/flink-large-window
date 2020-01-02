@@ -9,10 +9,14 @@ import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.DataStreamSink;
+import org.apache.flink.streaming.api.datastream.DataStreamSource;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.java.StreamTableEnvironment;
 import org.apache.flink.table.runtime.RowKeySelector;
+import org.apache.flink.table.sinks.StreamTableSink;
 import org.apache.flink.table.typeutils.TimeIndicatorTypeInfo;
 import org.apache.flink.types.Row;
 import org.yewc.flink.function.CenterFunction;
@@ -28,6 +32,7 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
 
     private StreamTableEnvironment streamTableEnvironment;
     private BrsExecutionDataFlow brsExecutionDataFlow;
+    private String uid;
 
     @Override
     public void brsExecutionEnvironment(StreamTableEnvironment streamTableEnvironment, Map<String, String> params,
@@ -60,8 +65,13 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
         // 是否保留旧数据输出
         final boolean keepOldData = Boolean.valueOf(params.getOrDefault("keep.old.data", "false"));
 
+        // 不管是否有新数据都输出
+        final boolean alwaysCalculate = Boolean.valueOf(params.getOrDefault("always.calculate", "true"));
+
         // 字段类型返回
         final String groupString = params.get("group.string");
+
+        this.uid = params.getOrDefault("uid", "default");
 
 
         // 选择 key
@@ -78,19 +88,25 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
             processFunction = new CenterFunction(keepOldData, windowSize, slideSize, lateness, timeField, groupString);
         } else {
             final boolean batch = Boolean.valueOf(params.getOrDefault("batch.mode", "false"));
-            processFunction = new GlobalFunction(keepOldData, windowSize, slideSize, lateness, timeField, groupString, batch);
+            processFunction = new GlobalFunction(keepOldData, windowSize, slideSize, lateness,
+                    timeField, groupString, batch, alwaysCalculate);
         }
 
         // 输入源
         DataStream sourceDataStream = getInputTable(inputTableName, inputTableType);
 
         // 执行
-        DataStream<Row> windowStream = sourceDataStream
+        SingleOutputStreamOperator<Row> windowStream = sourceDataStream
                 .map((v) -> v instanceof Tuple2 ? ((Tuple2) v).f1 : v) // 中间表的情况
+                .name("map_name_" + uid).uid("map_uid_" + uid)
 //                .assignTimestampsAndWatermarks(new EventWatermark(timeField))
                 .keyBy(keySelector)
                 .process(processFunction)
+                .name("process_name_" + uid).uid("process_uid_" + uid)
                 .returns(Types.ROW(getReturnTypes(groupString, inputTableName, inputTableType)));
+//        if (params.containsKey("uid")) {
+//            windowStream = windowStream.uid(params.get("uid"));
+//        }
 
         // 输出源
         toOutputTable(windowStream, outputTableName, outputTableType, String.join(",", getReturnFields(groupString)));
@@ -99,7 +115,8 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
     private DataStream getInputTable(String tableName, String tableType) {
         if ("source".equals(tableType)) {
             BrsExecutionDataFlow.RegistedDataSource dataSource = brsExecutionDataFlow.getTableSourceMap().get(tableName);
-            return dataSource.getDataStream();
+            return ((SingleOutputStreamOperator) dataSource.getDataStream())
+                    .name("source_table_name_" + uid).uid("source_table_uid_" + uid);
         } else if ("buffer".equals(tableType)) {
             Table dataSource = brsExecutionDataFlow.getBufferTableMap().get(tableName);
             TypeInformation[] typeTemp = dataSource.getSchema().getFieldTypes();
@@ -133,8 +150,12 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
     private void toOutputTable(DataStream<Row> windowStream,
                                String tableName, String tableType, String fields) {
         if ("sink".equals(tableType)) {
-            streamTableEnvironment.registerDataStream("window_table", windowStream);
-            streamTableEnvironment.sqlUpdate("insert into " + tableName + " select * from window_table");
+            StreamTableSink tableSink = ((StreamTableSink) brsExecutionDataFlow.getTableSinkMap().get(tableName));
+            tableSink.emitDataStream(windowStream);
+
+//            String windowName = "window_table_" + uid;
+//            streamTableEnvironment.registerDataStream(windowName, windowStream);
+//            streamTableEnvironment.sqlUpdate("insert into " + tableName + " select * from " + windowName);
         } else if ("buffer".equals(tableType)) {
             streamTableEnvironment.registerDataStream(tableName, windowStream, fields);
         }

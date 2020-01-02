@@ -7,6 +7,10 @@ import org.yewc.flink.util.DateUtils;
 
 import java.util.*;
 
+/**
+ * use org.yewc.flink.entity.GlobalValueData
+ */
+@Deprecated
 public class CountValueData extends ValueData {
 
     private Long value;

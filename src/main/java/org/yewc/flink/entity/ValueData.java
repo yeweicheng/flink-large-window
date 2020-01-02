@@ -2,6 +2,10 @@ package org.yewc.flink.entity;
 
 import org.apache.flink.types.Row;
 
+/**
+ * use org.yewc.flink.entity.GlobalValueData
+ */
+@Deprecated
 public abstract class ValueData {
 
     public Long lastWindow;

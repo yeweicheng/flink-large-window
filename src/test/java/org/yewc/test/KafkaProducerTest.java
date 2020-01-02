@@ -29,7 +29,7 @@ public class KafkaProducerTest {
         Set<String> allCount = new HashSet<>();
         Map<Long, Set<String>> keyCount = new HashMap<>();
         while (true) {
-            Thread.sleep(10);
+            Thread.sleep(1000);
             int value = random.nextInt(10);
             String c1 = random.nextInt(10000) + "";
             Long current = System.currentTimeMillis();

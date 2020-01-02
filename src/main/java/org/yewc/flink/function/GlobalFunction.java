@@ -23,6 +23,7 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Row> {
 
     private boolean keepOldData;
     private boolean batch;
+    private boolean alwaysCalculate;
     private Long windowUnix;
     private Long windowSlide;
     private Long lateness;
@@ -35,15 +36,11 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Row> {
     private Set<String> keyFlag;
     private Map<String, Integer> keyEmptyCount;
 
-    public GlobalFunction(boolean keepOldData, Long windowUnix, Long windowSlide,
-                          int timeField, String groupString, boolean batch) {
-        this(keepOldData, windowUnix, windowSlide, 0L, timeField, groupString, batch);
-    }
-
     public GlobalFunction(boolean keepOldData, Long windowUnix, Long windowSlide, Long lateness,
-                          int timeField, String groupString, boolean batch) {
+                          int timeField, String groupString, boolean batch, boolean alwaysCalculate) {
         this.keepOldData = keepOldData;
         this.batch = batch;
+        this.alwaysCalculate = alwaysCalculate;
         this.windowUnix = windowUnix;
         this.windowSlide = windowSlide;
         this.lateness = lateness == null ? 0L : lateness;
@@ -110,53 +107,55 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Row> {
         // 输出数据
         Long waterMark = waterMarkState.value();
         String dataKey = ctx.getCurrentKey().toString();
-        int groupSize = groupKey.size();
-        int fieldSize = fieldKey.size();
-        Row row = new Row(fieldSize + groupSize);
-        for (int i = 0; i < fieldSize; i++) {
-            String[] typeAndField = fieldKey.getString(i).split("_");
-            String type = typeAndField[0];
-            int field = -1;
-            if (typeAndField.length == 2) {
-                field = Integer.valueOf(typeAndField[1]);
+        Object[] result = (Object[]) current.getValue(alwaysCalculate);
+        if (result != null) {
+            int groupSize = groupKey.size();
+            int fieldSize = fieldKey.size();
+            Row row = new Row(fieldSize + groupSize);
+            for (int i = 0; i < fieldSize; i++) {
+                String[] typeAndField = fieldKey.getString(i).split("_");
+                String type = typeAndField[0];
+                int field = -1;
+                if (typeAndField.length == 2) {
+                    field = Integer.valueOf(typeAndField[1]);
+                }
+
+                switch (type) {
+                    case "key":
+                        if (field == -1) {
+                            row.setField(i, dataKey);
+                        } else {
+                            row.setField(i, ctx.getCurrentKey().getField(field));
+                        }
+                        break;
+                    case "starttime":
+                        if (field == 10) {
+                            row.setField(i, (waterMark - windowUnix)/1000);
+                        } else if (field == 13) {
+                            row.setField(i, waterMark - windowUnix);
+                        } else {
+                            row.setField(i, DateUtils.format((waterMark - windowUnix)/1000));
+                        }
+                        break;
+                    case "endtime":
+                        if (field == 10) {
+                            row.setField(i, waterMark/1000 - 1);
+                        } else if (field == 13) {
+                            row.setField(i, waterMark - 1);
+                        } else {
+                            row.setField(i, DateUtils.format(waterMark/1000 - 1));
+                        }
+                        break;
+                    default:
+                        throw new RuntimeException("unmatch key type");
+                }
             }
 
-            switch (type) {
-                case "key":
-                    if (field == -1) {
-                        row.setField(i, dataKey);
-                    } else {
-                        row.setField(i, ctx.getCurrentKey().getField(field));
-                    }
-                    break;
-                case "starttime":
-                    if (field == 10) {
-                        row.setField(i, (waterMark - windowUnix)/1000);
-                    } else if (field == 13) {
-                        row.setField(i, waterMark - windowUnix);
-                    } else {
-                        row.setField(i, DateUtils.format((waterMark - windowUnix)/1000));
-                    }
-                    break;
-                case "endtime":
-                    if (field == 10) {
-                        row.setField(i, waterMark/1000 - 1);
-                    } else if (field == 13) {
-                        row.setField(i, waterMark - 1);
-                    } else {
-                        row.setField(i, DateUtils.format(waterMark/1000 - 1));
-                    }
-                    break;
-                default:
-                    throw new RuntimeException("unmatch key type");
+            for (int i = 0; i < result.length; i++) {
+                row.setField(i + fieldSize, result[i]);
             }
+            out.collect(row);
         }
-
-        Object[] result = (Object[]) current.getValue();
-        for (int i = 0; i < result.length; i++) {
-            row.setField(i + fieldSize, result[i]);
-        }
-        out.collect(row);
         waterMark += windowSlide;
         waterMarkState.update(waterMark);
 

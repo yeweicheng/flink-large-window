@@ -1,9 +1,15 @@
 package org.yewc.test;
 
+import org.apache.flink.shaded.guava18.com.google.common.hash.HashFunction;
+import org.apache.flink.shaded.guava18.com.google.common.hash.Hasher;
+import org.apache.flink.shaded.guava18.com.google.common.hash.Hashing;
 import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
+import org.apache.flink.util.StringUtils;
+import org.elasticsearch.common.hash.MurmurHash3;
 import org.roaringbitmap.RoaringBitmap;
 import org.roaringbitmap.longlong.Roaring64NavigableMap;
 
+import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -13,7 +19,9 @@ import java.util.concurrent.CompletableFuture;
 public class BitmapTest {
 
     public static void main(String[] args) throws Exception {
-        System.out.println(TimeWindow.getWindowStartWithOffset(1574761559986L, 0, 60000));
+        HashFunction hashFunction = Hashing.murmur3_128(0);
+        Hasher hasher = hashFunction.newHasher();
+        hasher.putString("map_uid_123", Charset.forName("UTF-8"));
     }
 
     public static void main1(String[] args) throws Exception {
