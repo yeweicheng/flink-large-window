@@ -8,6 +8,12 @@ import org.roaringbitmap.RoaringBitmap;
 import org.roaringbitmap.longlong.Roaring64NavigableMap;
 import org.yewc.flink.util.DateUtils;
 
+import java.text.SimpleDateFormat;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 
 public class GlobalValueData {
@@ -23,13 +29,15 @@ public class GlobalValueData {
     private boolean emptyFlag;
     private int[] fieldIndexes;
     private Map<Long, Object[]> globalWindow;
+    private Set<Long> recountWindow;
 
-    public GlobalValueData(Long windowUnix, Long windowSlide, Long lateness, int timeField, JSONArray groupKey) {
+    public GlobalValueData(Long windowUnix, Long windowSlide, Long lateness, int timeField, JSONArray groupKey, boolean recountLateData) {
         this.windowUnix = windowUnix;
         this.windowSlide = windowSlide;
         this.lateness = lateness;
         this.timeField = timeField;
         this.windowSplit = new Long(windowUnix/windowSlide).intValue();
+        this.recountWindow = recountLateData ? new HashSet<>() : null;
 
         this.globalWindow = new HashMap<>();
         this.emptyFlag = true;
@@ -70,13 +78,13 @@ public class GlobalValueData {
         }
     }
 
-    public GlobalValueData(Long windowUnix, Long windowSlide, int timeField, JSONArray groupKey) {
-        this(windowUnix, windowSlide, 0L, timeField, groupKey);
+    public GlobalValueData(Long windowUnix, Long windowSlide, int timeField, JSONArray groupKey, boolean recountLateData) {
+        this(windowUnix, windowSlide, 0L, timeField, groupKey, recountLateData);
     }
 
     public void putElement(Row row) throws Exception {
         long time = DateUtils.parse(row.getField(timeField));
-        long start = TimeWindow.getWindowStartWithOffset(time, 0, windowSlide);
+        Long start = TimeWindow.getWindowStartWithOffset(time, 0, windowSlide);
         if (!globalWindow.containsKey(start)) {
             globalWindow.put(start, cloneEmpty(emptyValue));
         }
@@ -89,6 +97,13 @@ public class GlobalValueData {
 
         if (emptyFlag) {
             emptyFlag = false;
+        }
+
+        // 记录当前及之后的窗口数据
+        if (recountWindow != null) {
+            if (!recountWindow.contains(start)) {
+                recountWindow.addAll(getBetweenTime(start, getEndDayTime(start)));
+            }
         }
     }
 
@@ -105,13 +120,19 @@ public class GlobalValueData {
      * @return
      * @throws Exception
      */
-    public Object getValue(boolean alwaysCalculate) throws Exception {
+    public Object getValue(boolean alwaysCalculate, boolean startZeroTime) throws Exception {
         // 如果没有最新分片的数据和要去除的数据，直接返回缓存值
         if (emptyFlag) {
             if (alwaysCalculate) {
+                // 当前空窗口数据也输出
                 if (value != null && !globalWindow.containsKey(lastWindow - windowSlide) &&
                         !globalWindow.containsKey(lastWindow - windowSlide * (windowSplit + 1))) {
-                    return value;
+                    if (recountWindow == null) {
+                        return value;
+                    }
+
+                    // 重计算模式下value会有历史，需要重跑
+                    recountWindow.add(lastWindow);
                 }
             } else {
                 if (!globalWindow.containsKey(lastWindow - windowSlide) &&
@@ -119,21 +140,55 @@ public class GlobalValueData {
                     return null;
                 }
             }
+        } else if (recountWindow != null) {
+            recountWindow.add(lastWindow);
         }
 
+        Object[] valueTemp;
+        if (recountWindow == null) {
+            valueTemp = toCountData(lastWindow, startZeroTime);
+        } else {
+            valueTemp = new Object[recountWindow.size()];
+            Iterator<Long> iter = recountWindow.iterator();
+            int i = 0;
+            Long window;
+            Object[] temp;
+            while (iter.hasNext()) {
+                window = iter.next();
+                temp = new Object[2];
+                temp[0] = window;
+                temp[1] = toCountData(window, startZeroTime);
+                valueTemp[i] = temp;
+                i++;
+            }
+            recountWindow.clear();
+        }
+
+        if (alwaysCalculate) {
+            this.value = valueTemp;
+        }
+        return valueTemp;
+    }
+
+    private Object[] toCountData(Long currentWindow, boolean startZeroTime) throws Exception {
         Object[] tempValue = cloneEmpty(emptyValue);
 
+        Long start = (startZeroTime ? getStartDayTime(currentWindow - 1) : null);
+        Long end = (startZeroTime ? getEndDayTime(currentWindow - 1) : null);
         List<Long> removeKey = new ArrayList<>();
         Iterator<Map.Entry<Long, Object[]>> item = globalWindow.entrySet().iterator();
         while (item.hasNext()) {
             Map.Entry<Long, Object[]> kv = item.next();
             Long key = kv.getKey();
+
             // 获取每个分片是否在总窗口范围内，超出或未来的均忽略
-            int bt = (int) ((lastWindow - key)/windowSlide);
+            int bt = (int) ((currentWindow - key)/windowSlide);
             if (bt >= 1 && bt <= windowSplit) {
-                Object[] data = kv.getValue();
-                for (int i = 0; i < data.length; i++) {
-                    tempValue[i] = handleData(tempValue[i], data[i], true);
+                if (!startZeroTime || (key >= start && key <= end)) {
+                    Object[] data = kv.getValue();
+                    for (int i = 0; i < data.length; i++) {
+                        tempValue[i] = handleData(tempValue[i], data[i], true);
+                    }
                 }
             } else if (bt > windowSplit) {
                 removeKey.add(key);
@@ -162,9 +217,6 @@ public class GlobalValueData {
             }
         }
 
-        if (alwaysCalculate) {
-            this.value = value;
-        }
         return value;
     }
 
@@ -229,6 +281,40 @@ public class GlobalValueData {
         return newOs;
     }
 
+    /**
+     * 获取窗口当天开始时间
+     * @param time
+     * @return
+     * @throws Exception
+     */
+    private Long getStartDayTime(Long time) throws Exception {
+        SimpleDateFormat sdf = new SimpleDateFormat("yyyyMMdd");
+        return sdf.parse(sdf.format(new Date(time))).getTime();
+    }
+
+    /**
+     * 获取窗口当天结束时间
+     * @param time
+     * @return
+     * @throws Exception
+     */
+    private Long getEndDayTime(Long time) throws Exception {
+        SimpleDateFormat sdf = new SimpleDateFormat("yyyyMMdd");
+        return sdf.parse(sdf.format(new Date(time))).getTime() + 86400000 - windowSlide;
+    }
+
+    private List<Long> getBetweenTime(Long start, Long end) throws Exception {
+        List<Long> result = new ArrayList<>();
+        int size = Long.valueOf((end - start)/windowSlide).intValue() + 1;
+        for (int i = 1; i <= size; i++) {
+            Long temp = start + windowSlide*i;
+            if (lastWindow == null || temp.compareTo(lastWindow) <= 0) {
+                result.add(temp);
+            }
+        }
+        return result;
+    }
+
     public boolean isEmptyFlag() {
         return emptyFlag;
     }
@@ -236,4 +322,18 @@ public class GlobalValueData {
     public void setEmptyFlag(boolean emptyFlag) {
         this.emptyFlag = emptyFlag;
     }
+
+    //    public static void main(String[] args) throws Exception {
+//        Long start = (GlobalValueData.getStartDayTime(1577960399999L));
+//        Long end = (GlobalValueData.getEndDayTime(1577960399999L));
+//
+//        SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+//        System.out.println(sdf.format(new Date(start)));
+//        System.out.println(sdf.format(new Date(end)));
+//
+//        List<Long> result = GlobalValueData.getBetweenTime(start, end);
+//        for (int i = 0; i < result.size(); i++) {
+//            System.out.println(sdf.format(new Date(result.get(i))));
+//        }
+//    }
 }

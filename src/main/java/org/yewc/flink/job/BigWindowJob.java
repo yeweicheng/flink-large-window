@@ -4,6 +4,8 @@ import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
 import com.flink.executor.base.jar.BrsExecutionDataFlow;
 import com.flink.executor.base.jar.IBrsExecutionEnvironment;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.flink.api.common.functions.FilterFunction;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.java.functions.KeySelector;
@@ -68,6 +70,21 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
         // 不管是否有新数据都输出
         final boolean alwaysCalculate = Boolean.valueOf(params.getOrDefault("always.calculate", "true"));
 
+        // 是否从0点开始算，一般用于天累计
+        final boolean startZeroTime = Boolean.valueOf(params.getOrDefault("start.zero.time", "false"));
+
+        // 迟到数据是否重算它当前及之后的窗口
+        final boolean recountLateData = Boolean.valueOf(params.getOrDefault("recount.late.data", "false"));
+
+        // 批量模式
+        final boolean batch = Boolean.valueOf(params.getOrDefault("batch.mode", "false"));
+
+        // 条件过滤
+        final String where = params.getOrDefault("where", "");
+
+        // 查询过滤
+        final String select = params.getOrDefault("select", "*");
+
         // 字段类型返回
         final String groupString = params.get("group.string");
 
@@ -87,29 +104,39 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
         if ("center".equals(executeMode)) {
             processFunction = new CenterFunction(keepOldData, windowSize, slideSize, lateness, timeField, groupString);
         } else {
-            final boolean batch = Boolean.valueOf(params.getOrDefault("batch.mode", "false"));
-            processFunction = new GlobalFunction(keepOldData, windowSize, slideSize, lateness,
-                    timeField, groupString, batch, alwaysCalculate);
+            processFunction = GlobalFunction.getInstance()
+                    .setKeepOldData(keepOldData)
+                    .setWindowSplit(slideSize, windowSize)
+                    .setLateness(lateness)
+                    .setTimeField(timeField)
+                    .setGroupSchema(groupString)
+                    .setBatch(batch)
+                    .setAlwaysCalculate(alwaysCalculate)
+                    .setStartZeroTime(startZeroTime)
+                    .setRecountLateData(recountLateData);
         }
+
+        TypeInformation rowTypes = Types.ROW(getReturnTypes(groupString, inputTableName, inputTableType));
 
         // 输入源
         DataStream sourceDataStream = getInputTable(inputTableName, inputTableType);
 
         // 执行
-        SingleOutputStreamOperator<Row> windowStream = sourceDataStream
+        SingleOutputStreamOperator<Tuple2> windowStream = sourceDataStream
                 .map((v) -> v instanceof Tuple2 ? ((Tuple2) v).f1 : v) // 中间表的情况
                 .name("map_name_" + uid).uid("map_uid_" + uid)
 //                .assignTimestampsAndWatermarks(new EventWatermark(timeField))
                 .keyBy(keySelector)
                 .process(processFunction)
                 .name("process_name_" + uid).uid("process_uid_" + uid)
-                .returns(Types.ROW(getReturnTypes(groupString, inputTableName, inputTableType)));
+                .returns(Types.TUPLE(Types.BOOLEAN, rowTypes));
 //        if (params.containsKey("uid")) {
 //            windowStream = windowStream.uid(params.get("uid"));
 //        }
 
         // 输出源
-        toOutputTable(windowStream, outputTableName, outputTableType, String.join(",", getReturnFields(groupString)));
+        toOutputTable(windowStream, outputTableName, outputTableType, select, where, rowTypes,
+                String.join(",", getReturnFields(groupString)));
     }
 
     private DataStream getInputTable(String tableName, String tableType) {
@@ -147,17 +174,27 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
         return Types.STRING;
     }
 
-    private void toOutputTable(DataStream<Row> windowStream,
-                               String tableName, String tableType, String fields) {
-        if ("sink".equals(tableType)) {
-            StreamTableSink tableSink = ((StreamTableSink) brsExecutionDataFlow.getTableSinkMap().get(tableName));
-            tableSink.emitDataStream(windowStream);
+    private void toOutputTable(DataStream<Tuple2> windowStream, String tableName, String tableType,
+                               String select, String where, TypeInformation rowTypes, String fields) {
+        if (!"*".equals(select) || StringUtils.isNotBlank(where)) {
+            streamTableEnvironment.registerDataStream(tableName + "_" + uid,
+                    windowStream.map((v) -> v.f1).returns(rowTypes),
+                    fields);
+            String sql = " select " + select + " from " + tableName + "_" + uid + " where 1 = 1 and " + where;
 
-//            String windowName = "window_table_" + uid;
-//            streamTableEnvironment.registerDataStream(windowName, windowStream);
-//            streamTableEnvironment.sqlUpdate("insert into " + tableName + " select * from " + windowName);
-        } else if ("buffer".equals(tableType)) {
-            streamTableEnvironment.registerDataStream(tableName, windowStream, fields);
+            if ("sink".equals(tableType)) {
+                streamTableEnvironment.sqlUpdate(" insert into " + tableName + sql);
+            } else if ("buffer".equals(tableType)) {
+                Table table = streamTableEnvironment.sqlQuery(sql);
+                streamTableEnvironment.registerTable(tableName, table);
+            }
+        } else {
+            if ("sink".equals(tableType)) {
+                StreamTableSink tableSink = ((StreamTableSink) brsExecutionDataFlow.getTableSinkMap().get(tableName));
+                tableSink.emitDataStream(windowStream);
+            } else if ("buffer".equals(tableType)) {
+                streamTableEnvironment.registerDataStream(tableName, windowStream, fields);
+            }
         }
     }
 

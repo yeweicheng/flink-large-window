@@ -28,6 +28,7 @@ import org.yewc.flink.watermark.EventWatermark;
 
 import javax.xml.crypto.Data;
 import java.sql.Timestamp;
+import java.text.SimpleDateFormat;
 import java.util.Properties;
 
 public class DataStreamTest {
@@ -57,9 +58,9 @@ public class DataStreamTest {
         // make parameters available in the web interface
         env.getConfig().setGlobalJobParameters(params);
 
-        final Long windowSize = 5*60000L;
+        final Long windowSize = 86400000L + 3600000L;
         final Long slideSize = 60000L;
-        final Long lateness = 10000L;
+        final Long lateness = 0L;
 
         final int timeField = 3;
         final String groupString = "{\"field\": [\"key\", \"endtime\"], " +
@@ -76,6 +77,17 @@ public class DataStreamTest {
         Table table = ste.sqlQuery("select * from source_table");
         DataStream midle = ste.toRetractStream(table, table.getSchema().toRowType());
 
+        GlobalFunction gf = GlobalFunction.getInstance()
+                .setKeepOldData(keepOldData)
+                .setWindowSplit(slideSize, windowSize)
+                .setLateness(lateness)
+                .setTimeField(timeField)
+                .setGroupSchema(groupString)
+                .setBatch(false)
+                .setAlwaysCalculate(true)
+                .setStartZeroTime(true)
+                .setRecountLateData(true);
+
         DataStream counts = midle.map((v) -> {
                                 if (v instanceof Tuple2) {
                                     return ((Tuple2) v).f1;
@@ -84,8 +96,8 @@ public class DataStreamTest {
                         })
 //                        .assignTimestampsAndWatermarks(new EventWatermark(timeField))
                         .keyBy(keySelector)
-                        .process(new GlobalFunction(keepOldData, windowSize, slideSize, lateness, timeField, groupString, false, false))
-                        .returns(Types.ROW(Types.STRING, Types.STRING, Types.LONG, Types.LONG, Types.LONG, Types.LONG));
+                        .process(gf)
+                        .returns(Types.TUPLE(Types.BOOLEAN, Types.ROW(Types.STRING, Types.STRING, Types.LONG, Types.LONG, Types.LONG, Types.LONG)));
 
         counts.print();
         env.execute("WindowWordCount");
@@ -96,17 +108,17 @@ public class DataStreamTest {
         @Override
         public void flatMap(String value, Collector<Row> out) {
             try {
+                SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+
                 JSONObject temp = JSONObject.parseObject(value);
                 Row row = new Row(4);
                 row.setField(0, temp.getString("c1"));
                 row.setField(1, temp.getInteger("c2"));
                 row.setField(2, temp.getLong("c3"));
-                row.setField(3, new Timestamp(temp.getLong("c4")));
+                row.setField(3, new Timestamp(sdf.parse(temp.getString("c4")).getTime()));
                 out.collect(row);
             } catch (Exception e) {
-                if (!(e instanceof JSONException)) {
-                    throw e;
-                }
+                e.printStackTrace();
             }
 
         }
