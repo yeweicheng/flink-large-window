@@ -5,14 +5,16 @@ import com.alibaba.fastjson.JSONObject;
 import com.flink.executor.base.jar.BrsExecutionDataFlow;
 import com.flink.executor.base.jar.IBrsExecutionEnvironment;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.flink.api.common.functions.FilterFunction;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.contrib.streaming.state.DefaultConfigurableOptionsFactory;
+import org.apache.flink.contrib.streaming.state.OptionsFactory;
+import org.apache.flink.contrib.streaming.state.RocksDBStateBackend;
+import org.apache.flink.runtime.state.StateBackend;
+import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.datastream.DataStream;
-import org.apache.flink.streaming.api.datastream.DataStreamSink;
-import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.table.api.Table;
@@ -23,8 +25,9 @@ import org.apache.flink.table.typeutils.TimeIndicatorTypeInfo;
 import org.apache.flink.types.Row;
 import org.yewc.flink.function.CenterFunction;
 import org.yewc.flink.function.GlobalFunction;
-import org.yewc.flink.watermark.EventWatermark;
+import org.yewc.flink.watermark.TheWatermark;
 
+import java.io.IOException;
 import java.util.Map;
 
 /**
@@ -42,6 +45,19 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
 
         this.streamTableEnvironment = streamTableEnvironment;
         this.brsExecutionDataFlow = brsExecutionDataFlow;
+
+//        StateBackend sb = this.streamTableEnvironment.execEnv().getStateBackend();
+//        if (sb instanceof RocksDBStateBackend) {
+//            RocksDBStateBackend rocksdb = (RocksDBStateBackend) sb;
+//            DefaultConfigurableOptionsFactory op = ((DefaultConfigurableOptionsFactory) rocksdb.getOptions());
+//            if (op == null) {
+//                op = new DefaultConfigurableOptionsFactory();
+//            }
+//            op.setTargetFileSizeBase("256MB");
+//            op.setWriteBufferSize("256MB");
+//            op.setMaxBackgroundThreads(4);
+//            rocksdb.setOptions(op);
+//        }
 
         // 输入数据的Table和来源类型
         final String inputTableName = params.get("input.table.name");
@@ -88,8 +104,14 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
         // 字段类型返回
         final String groupString = params.get("group.string");
 
+        // processor uid标识
         this.uid = params.getOrDefault("uid", "default");
 
+        // 时间驱动
+        TimeCharacteristic tc = streamTableEnvironment.execEnv().getStreamTimeCharacteristic();
+        if (TimeCharacteristic.IngestionTime.equals(tc)) {
+            throw new RuntimeException("unsupported ingestion time");
+        }
 
         // 选择 key
         String[] keys = params.get("key.fields").split(",");
@@ -125,7 +147,7 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
         SingleOutputStreamOperator<Tuple2> windowStream = sourceDataStream
                 .map((v) -> v instanceof Tuple2 ? ((Tuple2) v).f1 : v) // 中间表的情况
                 .name("map_name_" + uid).uid("map_uid_" + uid)
-//                .assignTimestampsAndWatermarks(new EventWatermark(timeField))
+                .assignTimestampsAndWatermarks(new TheWatermark(timeField, tc))
                 .keyBy(keySelector)
                 .process(processFunction)
                 .name("process_name_" + uid).uid("process_uid_" + uid)

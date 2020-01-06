@@ -15,6 +15,7 @@ import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class GlobalValueData {
 
@@ -39,7 +40,7 @@ public class GlobalValueData {
         this.windowSplit = new Long(windowUnix/windowSlide).intValue();
         this.recountWindow = recountLateData ? new HashSet<>() : null;
 
-        this.globalWindow = new HashMap<>();
+        this.globalWindow = new ConcurrentHashMap<>();
         this.emptyFlag = true;
         this.emptyValue = new Object[groupKey.size()];
         this.fieldIndexes = new int[groupKey.size()];
@@ -308,9 +309,15 @@ public class GlobalValueData {
         int size = Long.valueOf((end - start)/windowSlide).intValue() + 1;
         for (int i = 1; i <= size; i++) {
             Long temp = start + windowSlide*i;
-            if (lastWindow == null || temp.compareTo(lastWindow) <= 0) {
-                result.add(temp);
+            if (lastWindow == null) {
+                if (temp.compareTo(new Date().getTime()) > 0) {
+                    continue;
+                }
+            } else if (temp.compareTo(lastWindow) > 0) {
+                continue;
             }
+
+            result.add(temp);
         }
         return result;
     }

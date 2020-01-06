@@ -1,9 +1,7 @@
 package org.yewc.test;
 
-import com.alibaba.fastjson.JSONException;
 import com.alibaba.fastjson.JSONObject;
 import org.apache.flink.api.common.functions.FlatMapFunction;
-import org.apache.flink.api.common.functions.MapFunction;
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeinfo.Types;
@@ -18,15 +16,12 @@ import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer;
 import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.java.StreamTableEnvironment;
-import org.apache.flink.table.functions.DistinctAggregateFunction;
 import org.apache.flink.table.runtime.RowKeySelector;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.Collector;
-import org.yewc.flink.function.CenterFunction;
 import org.yewc.flink.function.GlobalFunction;
-import org.yewc.flink.watermark.EventWatermark;
+import org.yewc.flink.watermark.TheWatermark;
 
-import javax.xml.crypto.Data;
 import java.sql.Timestamp;
 import java.text.SimpleDateFormat;
 import java.util.Properties;
@@ -42,7 +37,7 @@ public class DataStreamTest {
         // set up the execution environment
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         StreamTableEnvironment ste = StreamTableEnvironment.create(env);
-        env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime);
+        env.setStreamTimeCharacteristic(TimeCharacteristic.ProcessingTime);
         env.setStateBackend(new RocksDBStateBackend("hdfs://10.16.6.185:8020/flink/flink-rocksdb"));
         env.enableCheckpointing(60000, CheckpointingMode.EXACTLY_ONCE);
         env.setParallelism(1);
@@ -94,7 +89,7 @@ public class DataStreamTest {
                                 }
                                 return v;
                         })
-//                        .assignTimestampsAndWatermarks(new EventWatermark(timeField))
+                        .assignTimestampsAndWatermarks(new TheWatermark(timeField, env.getStreamTimeCharacteristic()))
                         .keyBy(keySelector)
                         .process(gf)
                         .returns(Types.TUPLE(Types.BOOLEAN, Types.ROW(Types.STRING, Types.STRING, Types.LONG, Types.LONG, Types.LONG, Types.LONG)));

@@ -2,7 +2,10 @@ package org.yewc.flink.function;
 
 import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
+import com.google.common.collect.Lists;
 import org.apache.flink.api.common.ExecutionConfig;
+import org.apache.flink.api.common.state.ListState;
+import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.java.tuple.Tuple2;
@@ -10,6 +13,7 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.state.CheckpointListener;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
 import org.apache.flink.runtime.state.FunctionSnapshotContext;
+import org.apache.flink.runtime.state.internal.InternalValueState;
 import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
@@ -19,26 +23,24 @@ import org.yewc.flink.entity.*;
 import org.yewc.flink.util.DateUtils;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 通用数据聚合函数
  */
-public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> implements CheckpointedFunction {
+public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
 
     /** 保留预聚合数据 */
     private ValueState<GlobalValueData> valueData;
 
     /** 保留缓存数据，只用在batch窗口中 */
-    private ValueState<List> buffer;
+    private ListState<Row> buffer;
 
     /** 保留最后的水印 */
     private ValueState<Long> waterMarkState;
 
     /** 保留预聚合数据 - 临时 */
-    private GlobalValueData valueDataTemp;
-
-    /** 保留缓存数据，只用在batch窗口中 - 临时 */
-    private List bufferTemp;
+    private Map<String, GlobalValueData> valueDataTemp;
 
     /** 是否保留历史状态，一般没必要，一旦超过总窗口时间就清除 */
     private boolean keepOldData;
@@ -91,12 +93,14 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> imple
 
     public GlobalFunction() {
         this.keyFlag = new HashSet<>(5);
+        this.valueDataTemp = new ConcurrentHashMap<>(5);
+
         this.lateness = 0L;
         this.batch = false;
         this.alwaysCalculate = true;
         this.keepOldData = false;
         this.startZeroTime = false;
-            this.recountLateData = false;
+        this.recountLateData = true;
     }
 
     @Override
@@ -105,7 +109,7 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> imple
         fieldKey = groupSchema.getJSONArray("field");
 
         valueData = getRuntimeContext().getState(new ValueStateDescriptor<>("valueState_global", GlobalValueData.class));
-        buffer = getRuntimeContext().getState(new ValueStateDescriptor<>("bufferState", List.class));
+        buffer = getRuntimeContext().getListState(new ListStateDescriptor<Row>("bufferState", Row.class));
         waterMarkState = getRuntimeContext().getState(new ValueStateDescriptor<>("waterMarkState", Long.class));
     }
 
@@ -116,41 +120,45 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> imple
 
     @Override
     public void processElement(Row row, Context ctx, Collector<Tuple2> out) throws Exception {
-        if (batch) {
-            if (bufferTemp == null) {
-                bufferTemp = buffer.value();
-                if (bufferTemp == null) {
-                    bufferTemp = new ArrayList<Row>();
-                }
-            }
+        String key = ctx.getCurrentKey().toString();
 
-            bufferTemp.add(row);
+        if (batch) {
+            buffer.add(row);
         } else {
-            valueStateHandler(row);
+            valueStateHandler(key, row);
         }
 
-        if (!keyFlag.contains(ctx.getCurrentKey().toString())) {
+        if (!keyFlag.contains(key)) {
             Long waterMark = waterMarkState.value();
-            if (waterMark == null) {
-                waterMark = TimeWindow.getWindowStartWithOffset(DateUtils.parse(row.getField(timeField)), 0, windowSlide) + windowSlide;
+            long currentWatermark = ctx.timerService().currentWatermark();
+            if (currentWatermark < 0) {
+                currentWatermark = System.currentTimeMillis();
+            }
+            currentWatermark = TimeWindow.getWindowStartWithOffset(currentWatermark, 0, windowSlide) + windowSlide;
+
+            if (waterMark == null || waterMark < currentWatermark) {
+                waterMark = currentWatermark;
                 waterMarkState.update(waterMark);
             }
             // 首次触发
             ctx.timerService().registerProcessingTimeTimer(waterMark + lateness);
-            keyFlag.add(ctx.getCurrentKey().toString());
+            keyFlag.add(key);
         }
     }
 
     @Override
     public void onTimer(long timestamp, OnTimerContext ctx, Collector<Tuple2> out) throws Exception {
+        String dataKey = ctx.getCurrentKey().toString();
 
         // 遍历需要聚合数据字段
-        List elements = bufferTemp;
-        GlobalValueData current = valueStateHandler(elements);
+        List elements = null;
+        if (batch) {
+            elements = Lists.newArrayList(buffer.get());
+        }
+        GlobalValueData current = valueStateHandler(dataKey, elements);
 
         // 输出数据
         Long waterMark = waterMarkState.value();
-        String dataKey = ctx.getCurrentKey().toString();
         Object[] result = (Object[]) current.getValue(alwaysCalculate, startZeroTime);
         if (result != null) {
             if (recountLateData) {
@@ -163,8 +171,6 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> imple
                 collectData(waterMark, dataKey, result, ctx, out);
             }
         }
-        waterMark += windowSlide;
-        waterMarkState.update(waterMark);
 
         // 判断是否需要清理长时间没有数据的旧key
         boolean nextTrigger = true;
@@ -188,21 +194,29 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> imple
 
         if (batch) {
             elements.clear();
-            buffer.update(elements);
+            buffer.clear();
         }
 
-//        System.out.println("onTimer trigger time: " + (waterMark));
         if (nextTrigger) {
-            ctx.timerService().registerProcessingTimeTimer(waterMark + lateness);
+            waterMark += windowSlide;
+            long currentWatermark = TimeWindow.getWindowStartWithOffset(ctx.timerService().currentWatermark(), 0, windowSlide) + windowSlide;
+            waterMarkState.update(waterMark);
+            if (waterMark <= currentWatermark) {
+                ctx.timerService().registerProcessingTimeTimer(waterMark + lateness);
+            } else {
+                // 说明当前水印没有更新，可能是数据延迟了，等下次有数据再启动
+                keyFlag.remove(dataKey);
+            }
         } else {
             keyEmptyCount.remove(dataKey);
             keyFlag.remove(dataKey);
+//            valueDataTemp.remove(dataKey);
 
-            waterMarkState.update(null);
-            valueData.update(null);
+            waterMarkState.clear();
+            valueData.clear();
 
             if (batch) {
-                buffer.update(null);
+                buffer.clear();
             }
         }
     }
@@ -267,40 +281,51 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> imple
     }
 
     /**
-     * 处理多类state
+     * 批量操作
      * @param elements
      * @throws Exception
      */
-    private GlobalValueData valueStateHandler(List elements) throws Exception {
-        if (valueDataTemp == null) {
-            valueDataTemp = valueData.value();
-            if (valueDataTemp == null) {
-                valueDataTemp = new GlobalValueData(windowUnix, windowSlide, timeField, groupKey, recountLateData);
-            }
+    private GlobalValueData valueStateHandler(String key, List elements) throws Exception {
+//        GlobalValueData theValueData = valueDataTemp.get(key);
+//        if (theValueData == null) {
+//            theValueData = valueData.value();
+//            if (theValueData == null) {
+//                theValueData = new GlobalValueData(windowUnix, windowSlide, timeField, groupKey, recountLateData);
+//            }
+//            valueDataTemp.put(key, theValueData);
+//        }
+
+        GlobalValueData theValueData = valueData.value();
+        if (theValueData == null) {
+            theValueData = new GlobalValueData(windowUnix, windowSlide, timeField, groupKey, recountLateData);
         }
 
-        valueDataTemp.lastWindow = waterMarkState.value();
+        theValueData.lastWindow = waterMarkState.value();
         if (batch) {
-            valueDataTemp.putElements(elements);
+            theValueData.putElements(elements);
         }
-        return valueDataTemp;
+        return theValueData;
     }
 
-    private void valueStateHandler(Row row) throws Exception {
-        if (valueDataTemp == null) {
-            valueDataTemp = valueData.value();
-            if (valueDataTemp == null) {
-                valueDataTemp = new GlobalValueData(windowUnix, windowSlide, timeField, groupKey, recountLateData);
-            }
+    /**
+     * 单行操作
+     * @param row
+     * @throws Exception
+     */
+    private void valueStateHandler(String key, Row row) throws Exception {
+        GlobalValueData theValueData = valueData.value();
+        if (theValueData == null) {
+            theValueData = new GlobalValueData(windowUnix, windowSlide, timeField, groupKey, recountLateData);
         }
 
-        valueDataTemp.putElement(row);
+        theValueData.putElement(row);
+        valueData.update(theValueData);
     }
 
     public GlobalFunction setKeepOldData(boolean keepOldData) {
         this.keepOldData = keepOldData;
         if (!keepOldData) {
-            keyEmptyCount = new HashMap<>();
+            keyEmptyCount = new ConcurrentHashMap<>();
         }
         return this;
     }
@@ -345,17 +370,6 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> imple
     public GlobalFunction setRecountLateData(boolean recountLateData) {
         this.recountLateData = recountLateData;
         return this;
-    }
-
-    @Override
-    public void snapshotState(FunctionSnapshotContext context) throws Exception {
-        buffer.update(bufferTemp);
-        valueData.update(valueDataTemp);
-    }
-
-    @Override
-    public void initializeState(FunctionInitializationContext context) throws Exception {
-        // 已经在open初始化了
     }
 }
 

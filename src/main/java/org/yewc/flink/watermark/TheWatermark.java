@@ -1,16 +1,21 @@
 package org.yewc.flink.watermark;
 
+import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.functions.AssignerWithPunctuatedWatermarks;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.types.Row;
 import org.yewc.flink.util.DateUtils;
 
-public class EventWatermark implements AssignerWithPunctuatedWatermarks {
+public class TheWatermark implements AssignerWithPunctuatedWatermarks {
 
     private int field;
+    private boolean event = false;
 
-    public EventWatermark(int field) {
+    public TheWatermark(int field, TimeCharacteristic tc) {
         this.field = field;
+        if (TimeCharacteristic.EventTime.equals(tc)) {
+            event = true;
+        }
     }
 
     @Override
@@ -20,7 +25,12 @@ public class EventWatermark implements AssignerWithPunctuatedWatermarks {
 
     @Override
     public long extractTimestamp(Object element, long previousElementTimestamp) {
+        if (!event) {
+            return System.currentTimeMillis();
+        }
+
         Row data = (Row) element;
-        return DateUtils.parse(data.getField(this.field));
+        long thisTime = DateUtils.parse(data.getField(this.field));
+        return thisTime < previousElementTimestamp ? thisTime : previousElementTimestamp;
     }
 }
