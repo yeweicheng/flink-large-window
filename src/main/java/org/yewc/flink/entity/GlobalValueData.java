@@ -17,6 +17,10 @@ import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * 没有必要专门写个POJO，参数多，且state含有多于的参数
+ */
+@Deprecated
 public class GlobalValueData {
 
     public Long lastWindow;
