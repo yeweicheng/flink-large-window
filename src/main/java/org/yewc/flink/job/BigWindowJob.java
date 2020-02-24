@@ -71,6 +71,9 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
         // 延迟触发时长
         final Long lateness = Long.valueOf(params.getOrDefault("lateness", "0"));
 
+        // 首次触发延迟，一般用于追数
+        final Long triggerLateMs = Long.valueOf(params.getOrDefault("trigger.late.ms", "0"));
+
         // watermark选用的字段
         final int timeField = Integer.valueOf(params.get("time.field"));
 
@@ -105,13 +108,10 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
         final String hkeySuffix = params.getOrDefault("hkey.suffix", "");
 
         // h key的field，如0
-        final int hkeyField = Integer.valueOf(params.get("hkey.field"));
+        final int hkeyField = Integer.valueOf(params.getOrDefault("hkey.field", "0"));
 
         // h key的time value，如0
-        final int hkeyValueTime = Integer.valueOf(params.get("hkey.value.time"));
-
-        // h key的value下标，如0,1,2
-        final String hkeyValues = params.getOrDefault("hkey.values", "");
+        final int hkeyValueTime = Integer.valueOf(params.getOrDefault("hkey.value.time", "0"));
 
         // h key的value下标和当前值映射，如0=0;1=1;2=2
         final String hkeyValueMap = params.get("hkey.value.map");
@@ -119,17 +119,10 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
         // 详单分割字符
         final String splitDetailChar = params.getOrDefault("split.detail.char", ",");
 
-        // 检查field是否已经存在
-        final boolean checkExists = Boolean.valueOf(params.getOrDefault("check.exists", "false"));
-
-        // 打印结果
-        final boolean print = Boolean.valueOf(params.getOrDefault("print", "false"));
-
         // redis相关
         final String redisAddress = params.get("redis.address");
-        final Integer redisPort = Integer.valueOf(params.get("redis.address"));
-        final String redisPasswd = params.get("redis.address");
-        final Integer redisExpire = Integer.valueOf(params.get("redis.address"));
+        final Integer redisPort = Integer.valueOf(params.getOrDefault("redis.port", "9100"));
+        final String redisPasswd = params.get("redis.passwd");
 
         // 时间驱动
         TimeCharacteristic tc = streamTableEnvironment.execEnv().getStreamTimeCharacteristic();
@@ -145,62 +138,41 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
         }
         final KeySelector keySelector = new RowKeySelector(keyIndexes, TypeInformation.of(Row.class));
 
-        final String executeMode = params.getOrDefault("processor.mode", "global");
-
         // 输入源
         DataStream sourceDataStream = getInputTable(inputTableName, inputTableType, qConfig);
 
-        KeyedProcessFunction processFunction;
-        if ("redis.detail".equals(executeMode)) {
-            processFunction = DetailRedisFunction.getInstance(hkeyPrefix, hkeySuffix, hkeyField, hkeyValues, splitDetailChar)
-                    .setRedisUtil(redisAddress, redisPort, redisPasswd, redisExpire, checkExists)
-                    .isPrint(print);
+        KeyedProcessFunction processFunction = GlobalFunction.getInstance()
+                .setKeepOldData(keepOldData)
+                .setWindowSplit(slideSize, windowSize)
+                .setLateness(lateness)
+                .setTimeField(timeField)
+                .setGroupSchema(groupString)
+                .setAlwaysCalculate(alwaysCalculate)
+                .setStartZeroTime(startZeroTime)
+                .setRecountLateData(recountLateData)
+                .setTriggerLateMs(triggerLateMs);
 
-            // 执行
-            SingleOutputStreamOperator<Tuple2> windowStream = sourceDataStream
-                    .map((v) -> v instanceof Tuple2 ? ((Tuple2) v).f1 : v) // 中间表的情况
-                    .name("map_name_" + uid).uid("map_uid_" + uid)
-                    .keyBy(keySelector)
-                    .process(processFunction)
-                    .name("process_name_" + uid).uid("process_uid_" + uid)
-                    .returns(Types.TUPLE(Types.BOOLEAN, Types.ROW(Types.STRING, Types.STRING, Types.STRING)));
-
-            // 输出源
-            StreamTableSink tableSink = ((StreamTableSink) brsExecutionDataFlow.getTableSinkMap().get(outputTableName));
-            tableSink.emitDataStream(windowStream);
-        } else {
-            processFunction = GlobalFunction.getInstance()
-                    .setKeepOldData(keepOldData)
-                    .setWindowSplit(slideSize, windowSize)
-                    .setLateness(lateness)
-                    .setTimeField(timeField)
-                    .setGroupSchema(groupString)
-                    .setAlwaysCalculate(alwaysCalculate)
-                    .setStartZeroTime(startZeroTime)
-                    .setRecountLateData(recountLateData);
-
-            if (StringUtils.isNotBlank(hkeyValueMap)) {
-                processFunction = ((GlobalFunction) processFunction)
-                        .setRedisUtil(redisAddress, redisPort, redisPasswd)
-                        .setReduceInfo(hkeyPrefix, hkeySuffix, hkeyField, hkeyValueTime, hkeyValueMap, splitDetailChar);
-            }
-
-            TypeInformation rowTypes = Types.ROW(getReturnTypes(groupString, inputTableName, inputTableType));
-
-            // 执行
-            SingleOutputStreamOperator<Tuple2> windowStream = sourceDataStream
-                    .map((v) -> v instanceof Tuple2 ? ((Tuple2) v).f1 : v) // 中间表的情况
-                    .name("map_name_" + uid).uid("map_uid_" + uid)
-                    .assignTimestampsAndWatermarks(new TheWatermark(timeField, tc))
-                    .keyBy(keySelector)
-                    .process(processFunction)
-                    .name("process_name_" + uid).uid("process_uid_" + uid)
-                    .returns(Types.TUPLE(Types.BOOLEAN, rowTypes));
-
-            // 输出源
-            toOutputTable(windowStream, outputTableName, outputTableType, select, where, rowTypes,
-                    String.join(",", getReturnFields(groupString)), qConfig);
+        if (StringUtils.isNotBlank(hkeyValueMap)) {
+            processFunction = ((GlobalFunction) processFunction)
+                    .setRedisUtil(redisAddress, redisPort, redisPasswd)
+                    .setReduceInfo(hkeyPrefix, hkeySuffix, hkeyField, hkeyValueTime, hkeyValueMap, splitDetailChar);
         }
+
+        TypeInformation rowTypes = Types.ROW(getReturnTypes(groupString, inputTableName, inputTableType));
+
+        // 执行
+        SingleOutputStreamOperator<Tuple2> windowStream = sourceDataStream
+                .map((v) -> v instanceof Tuple2 ? ((Tuple2) v).f1 : v) // 中间表的情况
+                .name("map_name_" + uid).uid("map_uid_" + uid)
+                .assignTimestampsAndWatermarks(new TheWatermark(timeField, tc))
+                .keyBy(keySelector)
+                .process(processFunction)
+                .name("process_name_" + uid).uid("process_uid_" + uid)
+                .returns(Types.TUPLE(Types.BOOLEAN, rowTypes));
+
+        // 输出源
+        toOutputTable(windowStream, outputTableName, outputTableType, select, where, rowTypes,
+                String.join(",", getReturnFields(groupString)), qConfig);
     }
 
     private DataStream getInputTable(String tableName, String tableType, StreamQueryConfig qConfig) {

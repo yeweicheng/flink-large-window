@@ -5,7 +5,9 @@ import org.slf4j.LoggerFactory;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.exceptions.JedisConnectionException;
 
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public class RichJedisReader {
 
@@ -58,6 +60,46 @@ public class RichJedisReader {
         while (!success && retry < RETRIES) {
             try {
                 result = jedis.hgetAll(key);
+                success = true;
+            } catch (JedisConnectionException exception) {
+                Thread.sleep(TIMEOUT);
+                this.initInstance();
+                retry++;
+            }
+        }
+        if (!success) {
+            throw new JedisConnectionException("jedis connection error after " + RETRIES + " tries.");
+        }
+        return result;
+    }
+
+    public Set<String> hkeys(String key) throws InterruptedException {
+        boolean success = false;
+        int retry = 0;
+        Set<String> result = null;
+        while (!success && retry < RETRIES) {
+            try {
+                result = jedis.hkeys(key);
+                success = true;
+            } catch (JedisConnectionException exception) {
+                Thread.sleep(TIMEOUT);
+                this.initInstance();
+                retry++;
+            }
+        }
+        if (!success) {
+            throw new JedisConnectionException("jedis connection error after " + RETRIES + " tries.");
+        }
+        return result;
+    }
+
+    public List<String> hmget(String key, String... fields) throws InterruptedException {
+        boolean success = false;
+        int retry = 0;
+        List<String> result = null;
+        while (!success && retry < RETRIES) {
+            try {
+                result = jedis.hmget(key, fields);
                 success = true;
             } catch (JedisConnectionException exception) {
                 Thread.sleep(TIMEOUT);

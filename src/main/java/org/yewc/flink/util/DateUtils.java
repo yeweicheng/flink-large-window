@@ -7,7 +7,8 @@ import java.time.format.DateTimeFormatter;
 
 public final class DateUtils {
 
-    private final static DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    private final static DateTimeFormatter dtfull = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    private final static DateTimeFormatter dt = DateTimeFormatter.ofPattern("yyyy-MM-dd");
     private final static ZoneOffset zo = ZoneOffset.ofHours(8);
 
     /***
@@ -15,7 +16,15 @@ public final class DateUtils {
      * @return
      */
     public static String format(Long second) {
-        return dtf.format(LocalDateTime.ofEpochSecond(second, 0, zo));
+        return dtfull.format(LocalDateTime.ofEpochSecond(second, 0, zo));
+    }
+
+    /***
+     * second
+     * @return
+     */
+    public static String formatSimple(Long second) {
+        return dt.format(LocalDateTime.ofEpochSecond(second, 0, zo));
     }
 
     /***
@@ -38,7 +47,7 @@ public final class DateUtils {
             }
 
             time = time.substring(0, 19);
-            return LocalDateTime.parse(time, dtf).toEpochSecond(zo)*1000;
+            return LocalDateTime.parse(time, dtfull).toEpochSecond(zo)*1000;
         }
         return null;
     }

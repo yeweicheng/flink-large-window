@@ -2,21 +2,22 @@ package org.yewc.flink.function;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
+import org.apache.flink.streaming.api.functions.ProcessFunction;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.Collector;
+import org.yewc.flink.util.DateUtils;
 import org.yewc.flink.util.RichJedisReader;
 import org.yewc.flink.util.RichJedisWriter;
 
 /**
  * 详单保存到redis函数，这里是为了做减法操作
  */
-public class DetailRedisFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
+public class DetailRedisFunction extends ProcessFunction<Row, Tuple2> {
 
     /** h key的前缀，可以动态，如field_0 */
     private String hkeyPrefix;
 
-    /** h key的后缀，可以动态，如field_0 */
+    /** h key的后缀，可以动态，如field_0 目前不支持,直接写死key */
     private String hkeySuffix;
 
     /** h key的field，如0 */
@@ -35,10 +36,15 @@ public class DetailRedisFunction extends KeyedProcessFunction<Row, Row, Tuple2> 
     private boolean print = false;
 
     /** jedis reader */
-    private static RichJedisReader jedisReader;
+    private RichJedisReader jedisReader;
 
     /** jedis writer */
-    private static RichJedisWriter jedisWriter;
+    private RichJedisWriter jedisWriter;
+
+    private String redisAddress;
+    private Integer redisPort;
+    private String redisPasswd;
+    private Integer redisExpire;
 
     public static DetailRedisFunction getInstance(String hkeyPrefix, String hkeySuffix,
                                                   int hkeyField, String hkeyValues, String splitDetailChar) {
@@ -61,6 +67,14 @@ public class DetailRedisFunction extends KeyedProcessFunction<Row, Row, Tuple2> 
 
     @Override
     public void processElement(Row row, Context ctx, Collector<Tuple2> out) throws Exception {
+        // 初始化redis
+        if (jedisWriter == null) {
+            if (checkExists) {
+                jedisReader = new RichJedisReader(redisAddress, redisPort, redisPasswd);
+            }
+            jedisWriter = new RichJedisWriter(redisAddress, redisPort, redisPasswd, redisExpire);
+        }
+
         // 生成key
         String key = (hkeyPrefix == null ? "" : hkeyPrefix);
         if (StringUtils.isNotBlank(hkeyPrefix)) {
@@ -111,10 +125,14 @@ public class DetailRedisFunction extends KeyedProcessFunction<Row, Row, Tuple2> 
         jedisWriter.hset(key, field, value);
 
         if (print) {
-            Row result = new Row(3);
-            result.setField(0, key);
-            result.setField(1, field);
-            result.setField(2, value);
+            long curr = System.currentTimeMillis()/1000;
+
+            Row result = new Row(5);
+            result.setField(0, DateUtils.formatSimple(curr));
+            result.setField(1, DateUtils.format(curr));
+            result.setField(2, key);
+            result.setField(3, field);
+            result.setField(4, value);
             out.collect(new Tuple2(true, result));
         }
     }
@@ -127,10 +145,11 @@ public class DetailRedisFunction extends KeyedProcessFunction<Row, Row, Tuple2> 
      * @return
      */
     public DetailRedisFunction setRedisUtil(String address, int port, String passwd, int expire, boolean checkExists) {
-        if (checkExists) {
-            jedisReader = new RichJedisReader(address, port, passwd);
-        }
-        jedisWriter = new RichJedisWriter(address, port, passwd, expire);
+        this.redisAddress = address;
+        this.redisPort = port;
+        this.redisPasswd = passwd;
+        this.redisExpire = expire;
+        this.checkExists = checkExists;
         return this;
     }
 
