@@ -2,33 +2,23 @@ package org.yewc.flink.function;
 
 import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Sets;
-import org.apache.flink.api.common.ExecutionConfig;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.flink.api.common.state.*;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.runtime.state.CheckpointListener;
-import org.apache.flink.runtime.state.FunctionInitializationContext;
-import org.apache.flink.runtime.state.FunctionSnapshotContext;
-import org.apache.flink.runtime.state.internal.InternalValueState;
-import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.Collector;
 import org.roaringbitmap.RoaringBitmap;
 import org.roaringbitmap.longlong.Roaring64NavigableMap;
-import org.yewc.flink.entity.*;
 import org.yewc.flink.util.DateUtils;
 import org.yewc.flink.util.RichJedisReader;
 import org.yewc.flink.util.RichJedisWriter;
-import scala.Int;
 
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.Consumer;
 
 /**
  * 通用数据聚合函数
@@ -40,9 +30,6 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
 
     /** 窗口数据 */
     private MapState<Long, Object[]> globalWindow;
-
-    /** 窗口数据 - 去重元素的个数，用于减法 */
-    private MapState<Long, Map[]> distinctCountMap;
 
     /** 空值判断 */
     private ValueState<Boolean> emptyFlag;
@@ -106,8 +93,11 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
 
     /**----------- 以下用于减法操作 -----------*/
 
+    /** 窗口数据 - 去重元素的个数，用于减法 */
+    private MapState<Long, Map[]> distinctCountMap;
+
     /** 窗口数据，时间-订单 */
-    private MapState<String, Set> primaryKeyState;
+    private MapState<Long, Set> primaryKeyState;
 
     /** h key的前缀，可以动态，如field_0 */
     private String hkeyPrefix;
@@ -134,7 +124,7 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
     private Integer redisPort;
     private String redisPasswd;
 
-    /**----------- 以下用于追数用 -----------*/
+    /** ----------- 以下用于追数用 ----------- */
     /** rocksdb性能原因，所以第一次ontimer再开始入库，和triggerLateMs结合使用，用于追数 */
     private ValueState<Boolean> rocksdbStartState;
 
@@ -145,7 +135,7 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
     private Map<String, Map<Long, Object[]>> globalWindowBuffer;
 
     /** 记录key buffer */
-    private Map<String, Map<String, Set>> primaryKeyStateBuffer;
+    private Map<String, Map<Long, Set>> primaryKeyStateBuffer;
 
     /** 记录key buffer */
     private Map<String, Map<Long, Map[]>> distinctCountMapBuffer;
@@ -176,11 +166,11 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
         }
 
         if (hkeyValueMap != null) {
-            primaryKeyState = getRuntimeContext().getMapState(new MapStateDescriptor<>("primaryKeyState", String.class, Set.class));
+            primaryKeyState = getRuntimeContext().getMapState(new MapStateDescriptor<>("primaryKeyState", Long.class, Set.class));
             distinctCountMap = getRuntimeContext().getMapState(new MapStateDescriptor<>("distinctCountMap", Long.class, Map[].class));
         }
 
-        if (triggerLateMs > 0L) {
+        if (triggerLateMs != null && triggerLateMs > 0L) {
             rocksdbStartState = getRuntimeContext().getState(new ValueStateDescriptor<>("rocksdbStartState", Boolean.class));
         }
 
@@ -207,7 +197,7 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
                     currentWatermark = System.currentTimeMillis();
                 }
 
-                if (triggerLateMs > 0L) {
+                if (triggerLateMs != null && triggerLateMs > 0L) {
                     currentWatermark += triggerLateMs;
                     rocksdbStartState.update(false);
                 }
@@ -244,95 +234,8 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
         String dataKey = ctx.getCurrentKey().toString();
         Long waterMark = waterMarkState.value();
 
-        if (rocksdbStartState != null && !rocksdbStartState.value()) {
-            rocksdbStartState.update(true);
-            globalWindow.putAll(globalWindowBuffer.get(dataKey));
-            globalWindowBuffer.remove(dataKey);
-
-            if (distinctCountMap != null) {
-                distinctCountMap.putAll(distinctCountMapBuffer.get(dataKey));
-                primaryKeyState.putAll(primaryKeyStateBuffer.get(dataKey));
-
-                distinctCountMapBuffer.remove(dataKey);
-                primaryKeyStateBuffer.remove(dataKey);
-            }
-        }
-
-        if (distinctCountMap != null) {
-            // 减法操作
-            // 先移除早期的数据，没必要保留，目前采用windowUnix
-            String oldDt = DateUtils.formatSimple((waterMark - windowUnix) / 1000);
-            primaryKeyState.remove(oldDt);
-
-            Set<String> reduceSet = jedisReader.hkeys(hkeyPrefix);
-            if (reduceSet != null && reduceSet.size() > 0) {
-                final Map<String, Set> bufferKeys = new HashMap<>();
-                primaryKeyState.entries().forEach((v) -> bufferKeys.put(v.getKey(), v.getValue()));
-
-                for (String dt : bufferKeys.keySet()) {
-                    final Set<String> reduceKeys = new HashSet<>();
-                    final Set<String> keys = bufferKeys.get(dt);
-                    for (String primaryKey : reduceSet) {
-                        if (keys.contains(primaryKey)) {
-                            reduceKeys.add(primaryKey);
-                        }
-                    }
-
-                    if (reduceKeys.size() == 0) {
-                        continue;
-                    }
-
-                    // 获取详细数据
-                    String[] arrKey = reduceKeys.toArray(new String[reduceKeys.size()]);
-                    List<String> keyDatas = jedisReader.hmget(hkeyPrefix, arrKey);
-                    String[] splitData;
-                    Long minStart = Long.MAX_VALUE;
-                    Map<Long, List<String[]>> reduceBuffer = new HashMap<>();
-                    for (int i = 0; i < arrKey.length; i++) {
-                        splitData = keyDatas.get(i).split(splitDetailChar);
-                        Long start = TimeWindow.getWindowStartWithOffset(Long.valueOf(splitData[hkeyValueTime]), 0, windowSlide);
-                        minStart = Long.min(start, minStart);
-
-                        if (!reduceBuffer.containsKey(start)) {
-                            reduceBuffer.put(start, new ArrayList<>());
-                        }
-
-                        reduceBuffer.get(start).add(splitData);
-                    }
-
-
-                    for (Map.Entry<Long, List<String[]>> entry : reduceBuffer.entrySet()) {
-                        Long theTime = entry.getKey();
-                        Object[] data = globalWindow.get(theTime);
-                        if (data != null) {
-                            Map<Object, Integer>[] distinctMap = distinctCountMap.get(theTime);
-                            List<String[]> dataList = entry.getValue();
-                            for (int i = 0; i < dataList.size(); i++) {
-                                splitData = dataList.get(i);
-                                for (Integer index : hkeyValueMap.keySet()) {
-                                    data[index] = reduceData(data[index], distinctMap[index], splitData[hkeyValueMap.get(index)]);
-                                }
-                            }
-                            globalWindow.put(theTime, data);
-                            distinctCountMap.put(theTime, distinctMap);
-                        }
-                    }
-
-
-                    // 移除减去的主键
-                    keys.removeAll(reduceKeys);
-                    primaryKeyState.put(dt, keys);
-
-                    // 添加需要计算的时间窗口
-                    Set theRecountWindow = recountWindow.value();
-                    if (theRecountWindow == null) {
-                        theRecountWindow = new HashSet();
-                    }
-                    theRecountWindow.addAll(getBetweenTime(minStart, waterMark));
-                    recountWindow.update(theRecountWindow);
-                }
-            }
-        }
+        bufferCombine(dataKey);
+        reduceHandler(waterMark);
 
         // 输出数据
         Object[] result = (Object[]) getValue();
@@ -390,6 +293,7 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
 
             if (distinctCountMap != null) {
                 distinctCountMap.clear();
+                primaryKeyState.clear();
             }
         }
     }
@@ -454,44 +358,153 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
     }
 
     /**
+     * 数据减法操作
+     * @throws Exception
+     */
+    private void reduceHandler(Long waterMark) throws Exception {
+        if (distinctCountMap != null) {
+            // 减法操作
+            Set<String> reduceSet = jedisReader.hkeys(hkeyPrefix);
+            if (reduceSet != null && reduceSet.size() > 0) {
+                final Map<Long, Set> bufferKeys = new HashMap<>();
+                primaryKeyState.entries().forEach((v) -> bufferKeys.put(v.getKey(), v.getValue()));
+
+                for (Long dt : bufferKeys.keySet()) {
+                    final Set<String> reduceKeys = new HashSet<>();
+                    final Set<String> keys = bufferKeys.get(dt);
+                    for (String primaryKey : reduceSet) {
+                        if (keys.contains(primaryKey)) {
+                            reduceKeys.add(primaryKey);
+                        }
+                    }
+
+                    if (reduceKeys.size() == 0) {
+                        continue;
+                    }
+
+                    // 获取详细数据
+                    String[] arrKey = reduceKeys.toArray(new String[reduceKeys.size()]);
+                    List<String> keyDatas = jedisReader.hmget(hkeyPrefix, arrKey);
+                    String[] splitData;
+                    Long minStart = Long.MAX_VALUE;
+                    Map<Long, List<String[]>> reduceBuffer = new HashMap<>();
+                    for (int i = 0; i < arrKey.length; i++) {
+                        splitData = keyDatas.get(i).split(splitDetailChar);
+                        Long start = TimeWindow.getWindowStartWithOffset(Long.valueOf(splitData[hkeyValueTime]), 0, windowSlide);
+                        minStart = Long.min(start, minStart);
+
+                        if (!reduceBuffer.containsKey(start)) {
+                            reduceBuffer.put(start, new ArrayList<>());
+                        }
+
+                        reduceBuffer.get(start).add(splitData);
+                    }
+
+
+                    for (Map.Entry<Long, List<String[]>> entry : reduceBuffer.entrySet()) {
+                        Long theTime = entry.getKey();
+                        Object[] data = globalWindow.get(theTime);
+                        if (data != null) {
+                            Map<Object, Integer>[] distinctMap = distinctCountMap.get(theTime);
+                            List<String[]> dataList = entry.getValue();
+                            for (int i = 0; i < dataList.size(); i++) {
+                                splitData = dataList.get(i);
+                                for (Integer index : hkeyValueMap.keySet()) {
+                                    data[index] = reduceData(data[index], distinctMap[index], splitData[hkeyValueMap.get(index)]);
+                                }
+                            }
+                            globalWindow.put(theTime, data);
+                            distinctCountMap.put(theTime, distinctMap);
+                        }
+                    }
+
+
+                    // 移除减去的主键
+                    keys.removeAll(reduceKeys);
+                    primaryKeyState.put(dt, keys);
+
+                    // 添加需要计算的时间窗口
+                    Set theRecountWindow = recountWindow.value();
+                    if (theRecountWindow == null) {
+                        theRecountWindow = new HashSet();
+                    }
+                    theRecountWindow.addAll(getBetweenTime(minStart, waterMark));
+                    recountWindow.update(theRecountWindow);
+                }
+            }
+        }
+    }
+
+    /**
+     * 合并buffer数据
+     * @param dataKey
+     * @throws Exception
+     */
+    private void bufferCombine(String dataKey) throws Exception {
+        if (rocksdbStartState != null && !rocksdbStartState.value()) {
+            rocksdbStartState.update(true);
+
+            // 临界点，buffer和state都可能有数据，需要合并以免丢数
+            Iterable<Map.Entry<Long, Object[]>> globalIter = globalWindow.entries();
+            Map<Long, Object[]> globalMap = globalWindowBuffer.get(dataKey);
+            for (Map.Entry<Long, Object[]> enrty : globalIter) {
+                Long start = enrty.getKey();
+                if (globalMap.containsKey(start)) {
+                    Object[] data = globalMap.get(start);
+                    for (int i = 0; i < data.length; i++) {
+                        data[i] = handleData(data[i], null, enrty.getValue()[i], true);
+                    }
+                    globalMap.put(start, data);
+                } else {
+                    globalMap.put(start, enrty.getValue());
+                }
+            }
+            globalWindow.putAll(globalMap);
+            globalWindowBuffer.remove(dataKey);
+
+            if (distinctCountMap != null) {
+                Iterable<Map.Entry<Long, Map[]>> distinctIter = distinctCountMap.entries();
+                Map<Long, Map[]> distinctMap = distinctCountMapBuffer.get(dataKey);
+                for (Map.Entry<Long, Map[]> enrty : distinctIter) {
+                    Long start = enrty.getKey();
+                    if (distinctMap.containsKey(start)) {
+                        Map[] data = distinctMap.get(start);
+                        for (int i = 0; i < data.length; i++) {
+                            data[i].putAll(enrty.getValue()[i]);
+                        }
+                        distinctMap.put(start, data);
+                    } else {
+                        distinctMap.put(start, enrty.getValue());
+                    }
+                }
+                distinctCountMap.putAll(distinctMap);
+                distinctCountMapBuffer.remove(dataKey);
+
+                Iterable<Map.Entry<Long, Set>> primaryIter = primaryKeyState.entries();
+                Map<Long, Set> primaryMap = primaryKeyStateBuffer.get(dataKey);
+                for (Map.Entry<Long, Set> enrty : primaryIter) {
+                    Long start = enrty.getKey();
+                    if (primaryMap.containsKey(start)) {
+                        Set data = primaryMap.get(start);
+                        data.addAll(enrty.getValue());
+                        primaryMap.put(start, data);
+                    } else {
+                        primaryMap.put(start, enrty.getValue());
+                    }
+                }
+                primaryKeyState.putAll(primaryMap);
+                primaryKeyStateBuffer.remove(dataKey);
+            }
+        }
+    }
+
+    /**
      * 单行操作 - buffer 追数用
      * @param row
      * @throws Exception
      */
     private void bufferStateHandler(String key, Row row) throws Exception {
-        if (!globalWindowBuffer.containsKey(key)) {
-            Map temp = new HashMap<>();
-            Iterable<Map.Entry<Long, Object[]>> entryIter = globalWindow.entries();
-            for (Map.Entry<Long, Object[]> entry : entryIter) {
-                temp.put(entry.getKey(), entry.getValue());
-            }
-            globalWindowBuffer.put(key, temp);
-        }
-        Map<Long, Object[]> globalWindowTemp = globalWindowBuffer.get(key);
-
-        if (!primaryKeyStateBuffer.containsKey(key)) {
-            Map temp = new HashMap<>();
-            Iterable<Map.Entry<String, Set>> entryIter = primaryKeyState.entries();
-            for (Map.Entry<String, Set> entry : entryIter) {
-                temp.put(entry.getKey(), entry.getValue());
-            }
-            primaryKeyStateBuffer.put(key, temp);
-        }
-        Map<String, Set> primaryKeyTemp = primaryKeyStateBuffer.get(key);
-
-        if (!distinctCountMapBuffer.containsKey(key)) {
-            Map temp = new HashMap<>();
-            Iterable<Map.Entry<Long, Map[]>> entryIter = distinctCountMap.entries();
-            for (Map.Entry<Long, Map[]> entry : entryIter) {
-                temp.put(entry.getKey(), entry.getValue());
-            }
-            distinctCountMapBuffer.put(key, temp);
-        }
-        Map<Long, Map[]> distinctCountMapTemp = distinctCountMapBuffer.get(key);
-
-
         long time = DateUtils.parse(row.getField(timeField));
-
         // 0点之后，昨天迟到的数据不再计算，因为昨天24小时状态已清除一部分
         Long waterMark = waterMarkState.value();
         if (startZeroTime && waterMark != null) {
@@ -503,6 +516,42 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
         }
 
         Long start = TimeWindow.getWindowStartWithOffset(time, 0, windowSlide);
+
+        if (!globalWindowBuffer.containsKey(key)) {
+            Map temp = new HashMap<>();
+            Iterable<Map.Entry<Long, Object[]>> entryIter = globalWindow.entries();
+            for (Map.Entry<Long, Object[]> entry : entryIter) {
+                temp.put(entry.getKey(), entry.getValue());
+            }
+            globalWindowBuffer.put(key, temp);
+        }
+        Map<Long, Object[]> globalWindowTemp = globalWindowBuffer.get(key);
+
+        if (primaryKeyStateBuffer != null && !primaryKeyStateBuffer.containsKey(key)) {
+            Map temp = new HashMap<>();
+            Iterable<Map.Entry<Long, Set>> entryIter = primaryKeyState.entries();
+            for (Map.Entry<Long, Set> entry : entryIter) {
+                temp.put(entry.getKey(), entry.getValue());
+            }
+            primaryKeyStateBuffer.put(key, temp);
+        }
+
+        if (distinctCountMapBuffer != null &&!distinctCountMapBuffer.containsKey(key)) {
+            Map temp = new HashMap<>();
+            Iterable<Map.Entry<Long, Map[]>> entryIter = distinctCountMap.entries();
+            for (Map.Entry<Long, Map[]> entry : entryIter) {
+                temp.put(entry.getKey(), entry.getValue());
+            }
+            distinctCountMapBuffer.put(key, temp);
+        }
+
+        Map<Long, Map[]> distinctCountMapTemp = null;
+        Map<Long, Set> primaryKeyTemp = null;
+        if (distinctCountMapBuffer != null) {
+            distinctCountMapTemp = distinctCountMapBuffer.get(key);
+            primaryKeyTemp = primaryKeyStateBuffer.get(key);
+        }
+
         if (!globalWindowTemp.containsKey(start)) {
             globalWindowTemp.put(start, cloneEmpty(emptyValue));
         }
@@ -532,11 +581,10 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
 
         // 减法
         if (distinctCountMap != null) {
-            String dt = DateUtils.formatSimple(start/1000);
-            if (!primaryKeyTemp.containsKey(dt)) {
-                primaryKeyTemp.put(dt, new HashSet());
+            if (!primaryKeyTemp.containsKey(start)) {
+                primaryKeyTemp.put(start, new HashSet());
             }
-            Set primarySet = primaryKeyTemp.get(dt);
+            Set primarySet = primaryKeyTemp.get(start);
             primarySet.add(row.getField(hkeyField));
         }
 
@@ -573,6 +621,7 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
         }
 
         Long start = TimeWindow.getWindowStartWithOffset(time, 0, windowSlide);
+
         if (!globalWindow.contains(start)) {
             globalWindow.put(start, cloneEmpty(emptyValue));
         }
@@ -603,13 +652,12 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
 
         // 减法
         if (distinctCountMap != null) {
-            String dt = DateUtils.formatSimple(start/1000);
-            if (!primaryKeyState.contains(dt)) {
-                primaryKeyState.put(dt, new HashSet());
+            if (!primaryKeyState.contains(start)) {
+                primaryKeyState.put(start, new HashSet());
             }
-            Set primarySet = primaryKeyState.get(dt);
+            Set primarySet = primaryKeyState.get(start);
             primarySet.add(row.getField(hkeyField));
-            primaryKeyState.put(dt, primarySet);
+            primaryKeyState.put(start, primarySet);
 
             distinctCountMap.put(start, distinctMap);
         }
@@ -782,7 +830,8 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
         Object[] value = preValue.value();
 
         // 如果没有最新分片的数据和要去除的数据，直接返回缓存值
-        if (emptyFlag.value()) {
+        Boolean flag = emptyFlag.value();
+        if (flag == null || flag) {
             if (alwaysCalculate) {
                 // 当前空窗口数据也输出
                 if (value != null && !theGlobalWindow.containsKey(lastWindow - windowSlide) &&
@@ -862,6 +911,7 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
             theGlobalWindow.remove(removeKey.get(i));
             if (distinctCountMap != null) {
                 distinctCountMap.remove(removeKey.get(i));
+                primaryKeyState.remove(removeKey.get(i));
             }
         }
 

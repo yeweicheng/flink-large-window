@@ -57,8 +57,8 @@ public class DataStreamTest {
         final Long slideSize = 60000L;
         final Long lateness = 0L;
 
-        final int timeField = 3;
-        final String groupString = "{\"field\": [\"key\", \"endtime\"], " +
+        final int timeField = 4;
+        final String groupString = "{\"field\": [\"key_0\", \"endtime\"], " +
                 "\"group\": [\"distinct_1\", \"distinct_long_2\", \"distinct_int_1\", \"count_1\"]}";
 
         final boolean keepOldData = false;
@@ -67,8 +67,8 @@ public class DataStreamTest {
         final KeySelector keySelector = new RowKeySelector(keys, TypeInformation.of(Row.class));
 
         // 测试中间层
-        DataStream buffer = stream.flatMap(new Tokenizer()).returns(Types.ROW(Types.STRING, Types.INT, Types.LONG, Types.SQL_TIMESTAMP));
-        ste.registerDataStream("source_table", buffer, "c1,c2,c3,c4");
+        DataStream buffer = stream.flatMap(new Tokenizer()).returns(Types.ROW(Types.STRING, Types.INT, Types.LONG, Types.STRING, Types.SQL_TIMESTAMP));
+        ste.registerDataStream("source_table", buffer, "c1,c2,c3,c4,c5");
         Table table = ste.sqlQuery("select * from source_table");
         DataStream midle = ste.toRetractStream(table, table.getSchema().toRowType());
 
@@ -78,10 +78,13 @@ public class DataStreamTest {
                 .setLateness(lateness)
                 .setTimeField(timeField)
                 .setGroupSchema(groupString)
-                .setBatch(false)
                 .setAlwaysCalculate(true)
                 .setStartZeroTime(true)
-                .setRecountLateData(true);
+                .setRecountLateData(true)
+                .setReduceInfo("fx.flink.consume.reduce", null, 3, 2,
+                        "0=0;1=1;2=0;3=0", ",")
+                .setRedisUtil("10.17.4.12", 9201, "kgtest.2019.pika");
+//                .setTriggerLateMs(60000L);
 
         DataStream counts = midle.map((v) -> {
                                 if (v instanceof Tuple2) {
@@ -106,11 +109,17 @@ public class DataStreamTest {
                 SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
 
                 JSONObject temp = JSONObject.parseObject(value);
-                Row row = new Row(4);
+                Row row = new Row(5);
                 row.setField(0, temp.getString("c1"));
                 row.setField(1, temp.getInteger("c2"));
                 row.setField(2, temp.getLong("c3"));
-                row.setField(3, new Timestamp(sdf.parse(temp.getString("c4")).getTime()));
+                row.setField(3, temp.getString("c4"));
+                if (temp.getString("c5").length() == 19) {
+                    row.setField(4, new Timestamp(sdf.parse(temp.getString("c5")).getTime()));
+                } else {
+                    row.setField(4, new Timestamp(temp.getLong("c5")));
+                }
+
                 out.collect(row);
             } catch (Exception e) {
                 e.printStackTrace();

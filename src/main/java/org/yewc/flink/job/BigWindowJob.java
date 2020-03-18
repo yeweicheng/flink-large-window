@@ -4,7 +4,6 @@ import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
 import com.flink.executor.base.jar.BrsExecutionDataFlow;
 import com.flink.executor.base.jar.IBrsExecutionEnvironment;
-import com.flink.executor.base.util.SystemConsts;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
@@ -22,8 +21,6 @@ import org.apache.flink.table.runtime.RowKeySelector;
 import org.apache.flink.table.sinks.StreamTableSink;
 import org.apache.flink.table.typeutils.TimeIndicatorTypeInfo;
 import org.apache.flink.types.Row;
-import org.yewc.flink.function.CenterFunction;
-import org.yewc.flink.function.DetailRedisFunction;
 import org.yewc.flink.function.GlobalFunction;
 import org.yewc.flink.watermark.TheWatermark;
 

@@ -30,8 +30,8 @@ public class KafkaProducerTest {
         Map<Long, Set<String>> keyCount = new HashMap<>();
         while (true) {
             Thread.sleep(1000);
-            int value = random.nextInt(10);
-            String c1 = random.nextInt(10000) + "";
+            int value = random.nextInt(3);
+            String c1 = abc[random.nextInt(1)];
             Long current = System.currentTimeMillis();
 
             JSONObject jo = new JSONObject();
@@ -40,9 +40,10 @@ public class KafkaProducerTest {
             jo.put("c2", value);
             jo.put("c3", Long.valueOf(value));
             jo.put("c4", current);
+            jo.put("c5", current);
             String data = jo.toString();
             producer.send(new ProducerRecord<String, String>(topic, data));
-//            System.out.println(data);
+            System.out.println(data);
 
             Long currentKey = DateUtils.parse(DateUtils.format(System.currentTimeMillis()/1000).substring(0, 16) + ":59");
             if (nowSize == 0) {
