@@ -174,7 +174,7 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
             rocksdbStartState = getRuntimeContext().getState(new ValueStateDescriptor<>("rocksdbStartState", Boolean.class));
         }
 
-        if (keepLateZeroTime == null) {
+        if (keepLateZeroTime == null || keepLateZeroTime == 0L) {
             keepLateZeroTime = windowSlide;
         }
     }

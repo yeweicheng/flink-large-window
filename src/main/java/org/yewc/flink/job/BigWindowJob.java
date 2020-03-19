@@ -77,6 +77,9 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
         // 是否保留旧数据输出
         final boolean keepOldData = Boolean.valueOf(params.getOrDefault("keep.old.data", "false"));
 
+        // 保留旧数据最长时间
+        final Long keepLateZeroTime = Long.valueOf(params.getOrDefault("keep.late.zero.time", "0"));
+
         // 不管是否有新数据都输出
         final boolean alwaysCalculate = Boolean.valueOf(params.getOrDefault("always.calculate", "true"));
 
@@ -147,7 +150,8 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
                 .setAlwaysCalculate(alwaysCalculate)
                 .setStartZeroTime(startZeroTime)
                 .setRecountLateData(recountLateData)
-                .setTriggerLateMs(triggerLateMs);
+                .setTriggerLateMs(triggerLateMs)
+                .setKeepLateZeroTime(keepLateZeroTime);
 
         if (StringUtils.isNotBlank(hkeyValueMap)) {
             processFunction = ((GlobalFunction) processFunction)
