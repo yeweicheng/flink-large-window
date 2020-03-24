@@ -13,9 +13,11 @@ import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.table.api.StreamQueryConfig;
 import org.apache.flink.table.api.Table;
+import org.apache.flink.table.api.TableConfig;
 import org.apache.flink.table.api.java.StreamTableEnvironment;
 import org.apache.flink.table.runtime.RowKeySelector;
 import org.apache.flink.table.sinks.StreamTableSink;
@@ -32,8 +34,14 @@ import java.util.Map;
 public class BigWindowJob implements IBrsExecutionEnvironment {
 
     private StreamTableEnvironment streamTableEnvironment;
+    private StreamExecutionEnvironment env;
     private BrsExecutionDataFlow brsExecutionDataFlow;
     private String uid;
+
+    @Override
+    public void streamTableEnvironment(StreamExecutionEnvironment env) {
+        this.env = env;
+    }
 
     @Override
     public void brsExecutionEnvironment(StreamTableEnvironment streamTableEnvironment, Map<String, String> params,
@@ -42,12 +50,12 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
         this.streamTableEnvironment = streamTableEnvironment;
         this.brsExecutionDataFlow = brsExecutionDataFlow;
 
-        StreamQueryConfig qConfig = streamTableEnvironment.queryConfig();
+        TableConfig tableConfig = streamTableEnvironment.getConfig();
         if (params.containsKey("min.idle.state") && params.containsKey("max.idle.state")) {
-            String minIdleStateRetention = params.get("min.idle.state");
-            String maxIdleStateRetention = params.get("max.idle.state");
-            qConfig.withIdleStateRetentionTime(Time.seconds(Integer.parseInt(minIdleStateRetention)),
-                    Time.seconds(Integer.parseInt((maxIdleStateRetention))));
+            Long minIdleStateRetention = Long.valueOf(params.get("min.idle.state"));
+            Long maxIdleStateRetention = Long.valueOf(params.get("max.idle.state"));
+            tableConfig.setIdleStateRetentionTime(Time.milliseconds(minIdleStateRetention),
+                    Time.milliseconds(maxIdleStateRetention));
         }
 
         // 输入数据的Table和来源类型
@@ -125,7 +133,7 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
         final String redisPasswd = params.get("redis.passwd");
 
         // 时间驱动
-        TimeCharacteristic tc = streamTableEnvironment.execEnv().getStreamTimeCharacteristic();
+        TimeCharacteristic tc = env.getStreamTimeCharacteristic();
         if (TimeCharacteristic.IngestionTime.equals(tc)) {
             throw new RuntimeException("unsupported ingestion time");
         }
@@ -139,7 +147,7 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
         final KeySelector keySelector = new RowKeySelector(keyIndexes, TypeInformation.of(Row.class));
 
         // 输入源
-        DataStream sourceDataStream = getInputTable(inputTableName, inputTableType, qConfig);
+        DataStream sourceDataStream = getInputTable(inputTableName, inputTableType);
 
         KeyedProcessFunction processFunction = GlobalFunction.getInstance()
                 .setKeepOldData(keepOldData)
@@ -173,10 +181,10 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
 
         // 输出源
         toOutputTable(windowStream, outputTableName, outputTableType, select, where, rowTypes,
-                String.join(",", getReturnFields(groupString)), qConfig);
+                String.join(",", getReturnFields(groupString)));
     }
 
-    private DataStream getInputTable(String tableName, String tableType, StreamQueryConfig qConfig) {
+    private DataStream getInputTable(String tableName, String tableType) {
         if ("source".equals(tableType)) {
             BrsExecutionDataFlow.RegistedDataSource dataSource = brsExecutionDataFlow.getTableSourceMap().get(tableName);
             return ((SingleOutputStreamOperator) dataSource.getDataStream())
@@ -191,7 +199,7 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
                     typeArr[i] = Types.SQL_TIMESTAMP;
                 }
             }
-            return streamTableEnvironment.toRetractStream(dataSource, Types.ROW(typeArr), qConfig);
+            return streamTableEnvironment.toRetractStream(dataSource, Types.ROW(typeArr));
         }
         return null;
     }
@@ -212,7 +220,7 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
     }
 
     private void toOutputTable(DataStream<Tuple2> windowStream, String tableName, String tableType,
-                               String select, String where, TypeInformation rowTypes, String fields, StreamQueryConfig qConfig) {
+                               String select, String where, TypeInformation rowTypes, String fields) {
         if (!"*".equals(select) || StringUtils.isNotBlank(where)) {
             streamTableEnvironment.registerDataStream(tableName + "_" + uid,
                     windowStream.map((v) -> v.f1).returns(rowTypes),
@@ -220,7 +228,7 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
             String sql = " select " + select + " from " + tableName + "_" + uid + " where 1 = 1 and " + where;
 
             if ("sink".equals(tableType)) {
-                streamTableEnvironment.sqlUpdate(" insert into " + tableName + sql, qConfig);
+                streamTableEnvironment.sqlUpdate(" insert into " + tableName + sql);
             } else if ("buffer".equals(tableType)) {
                 Table table = streamTableEnvironment.sqlQuery(sql);
                 streamTableEnvironment.registerTable(tableName, table);

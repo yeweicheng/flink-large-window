@@ -214,10 +214,6 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
                 keyFlag.add(key);
             }
 
-            if (distinctCountMap != null && jedisReader == null) {
-                jedisReader = new RichJedisReader(redisAddress, redisPort, redisPasswd);
-            }
-
             if (rocksdbStartState != null && !rocksdbStartState.value()) {
                 bufferStateHandler(key, row);
             } else {
@@ -363,6 +359,10 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
      */
     private void reduceHandler(Long waterMark) throws Exception {
         if (distinctCountMap != null) {
+            if (jedisReader == null) {
+                jedisReader = new RichJedisReader(redisAddress, redisPort, redisPasswd);
+            }
+
             // 减法操作
             Set<String> reduceSet = jedisReader.hkeys(hkeyPrefix);
             if (reduceSet != null && reduceSet.size() > 0) {

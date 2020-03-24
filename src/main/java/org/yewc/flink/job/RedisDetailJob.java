@@ -16,6 +16,7 @@ import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.streaming.api.functions.ProcessFunction;
 import org.apache.flink.table.api.StreamQueryConfig;
 import org.apache.flink.table.api.Table;
+import org.apache.flink.table.api.TableConfig;
 import org.apache.flink.table.api.java.StreamTableEnvironment;
 import org.apache.flink.table.runtime.RowKeySelector;
 import org.apache.flink.table.sinks.StreamTableSink;
@@ -41,12 +42,12 @@ public class RedisDetailJob implements IBrsExecutionEnvironment {
         this.streamTableEnvironment = streamTableEnvironment;
         this.brsExecutionDataFlow = brsExecutionDataFlow;
 
-        StreamQueryConfig qConfig = streamTableEnvironment.queryConfig();
+        TableConfig tableConfig = streamTableEnvironment.getConfig();
         if (params.containsKey("min.idle.state") && params.containsKey("max.idle.state")) {
-            String minIdleStateRetention = params.get("min.idle.state");
-            String maxIdleStateRetention = params.get("max.idle.state");
-            qConfig.withIdleStateRetentionTime(Time.seconds(Integer.parseInt(minIdleStateRetention)),
-                    Time.seconds(Integer.parseInt((maxIdleStateRetention))));
+            Long minIdleStateRetention = Long.valueOf(params.get("min.idle.state"));
+            Long maxIdleStateRetention = Long.valueOf(params.get("max.idle.state"));
+            tableConfig.setIdleStateRetentionTime(Time.milliseconds(minIdleStateRetention),
+                    Time.milliseconds(maxIdleStateRetention));
         }
 
         // 输入数据的Table和来源类型
@@ -88,7 +89,7 @@ public class RedisDetailJob implements IBrsExecutionEnvironment {
         final Integer redisExpire = Integer.valueOf(params.get("redis.expire"));
 
         // 输入源
-        DataStream sourceDataStream = getInputTable(inputTableName, inputTableType, qConfig);
+        DataStream sourceDataStream = getInputTable(inputTableName, inputTableType);
 
         ProcessFunction processFunction
                 = DetailRedisFunction.getInstance(hkeyPrefix, hkeySuffix, hkeyField, hkeyValues, splitDetailChar)
@@ -105,10 +106,10 @@ public class RedisDetailJob implements IBrsExecutionEnvironment {
 
         // 输出源
         StreamTableSink tableSink = ((StreamTableSink) brsExecutionDataFlow.getTableSinkMap().get(outputTableName));
-        tableSink.emitDataStream(windowStream);
+        tableSink.consumeDataStream(windowStream);
     }
 
-    private DataStream getInputTable(String tableName, String tableType, StreamQueryConfig qConfig) {
+    private DataStream getInputTable(String tableName, String tableType) {
         if ("source".equals(tableType)) {
             BrsExecutionDataFlow.RegistedDataSource dataSource = brsExecutionDataFlow.getTableSourceMap().get(tableName);
             return ((SingleOutputStreamOperator) dataSource.getDataStream())
@@ -123,7 +124,7 @@ public class RedisDetailJob implements IBrsExecutionEnvironment {
                     typeArr[i] = Types.SQL_TIMESTAMP;
                 }
             }
-            return streamTableEnvironment.toRetractStream(dataSource, Types.ROW(typeArr), qConfig);
+            return streamTableEnvironment.toRetractStream(dataSource, Types.ROW(typeArr));
         }
         return null;
     }

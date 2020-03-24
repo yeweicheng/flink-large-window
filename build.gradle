@@ -18,13 +18,13 @@ plugins {
 
 // artifact properties
 group = 'org.yewc.flink'
-version = '0.2'
+version = '1.10.0'
 mainClassName = 'org.yewc.flink.core.EngineMain'
 description = """Flink Quickstart Job"""
 
 ext {
     javaVersion = '1.8'
-    flinkVersion = '1.8.0'
+    flinkVersion = '1.10.0'
     scalaBinaryVersion = '2.11'
     slf4jVersion = '1.7.7'
     log4jVersion = '1.2.17'
@@ -66,7 +66,7 @@ dependencies {
     // Compile-time dependencies that should NOT be part of the
     // shadow jar and are provided in the lib folder of Flink
     // --------------------------------------------------------------
-    compile group: 'org.roaringbitmap', name: 'RoaringBitmap', version: '0.8.11'
+    compile "org.roaringbitmap:RoaringBitmap:0.8.11"
     flinkShadowJar "org.apache.flink:flink-java:${flinkVersion}"
     flinkShadowJar "org.apache.flink:flink-streaming-java_${scalaBinaryVersion}:${flinkVersion}"
 
@@ -79,25 +79,24 @@ dependencies {
     flinkShadowJar "log4j:log4j:1.2.17"
     flinkShadowJar "org.slf4j:slf4j-log4j12:1.7.7"
 
-    flinkShadowJar group: 'org.apache.flink', name: 'flink-core', version: '1.8.0'
-    flinkShadowJar group: 'org.apache.flink', name: 'flink-connector-kafka_2.11', version: '1.8.0'
-    flinkShadowJar group: 'org.apache.flink', name: 'flink-streaming-java_2.11', version: '1.8.0'
-    flinkShadowJar group: 'org.apache.flink', name: 'flink-table', version: '1.8.0'
-    flinkShadowJar group: 'org.apache.flink', name: 'flink-table-planner_2.11', version: '1.8.0'
-    flinkShadowJar group: 'org.apache.flink', name: 'flink-streaming-scala_2.11', version: '1.8.0'
-    flinkShadowJar group: 'org.apache.flink', name: 'flink-statebackend-rocksdb_2.11', version: '1.8.0'
-    flinkShadowJar group: 'org.apache.hadoop', name: 'hadoop-client', version: '2.7.1'
-    flinkShadowJar group: 'org.apache.kudu', name: 'kudu-client', version: '1.8.0'
-    flinkShadowJar group: 'com.alibaba', name: 'fastjson', version: '1.2.56'
-    flinkShadowJar group: 'ch.qos.logback', name: 'logback-core', version: '1.2.3'
-    flinkShadowJar group: 'ch.qos.logback', name: 'logback-classic', version: '1.2.3'
-    flinkShadowJar group: 'com.github.jsqlparser', name: 'jsqlparser', version: '2.0'
-    flinkShadowJar group: 'org.apache.commons', name: 'commons-jexl3', version: '3.1'
-    flinkShadowJar group: 'org.apache.flink', name: 'flink-test-utils_2.11', version: '1.8.0'
-    flinkShadowJar group: 'org.apache.flink', name: 'flink-cep_2.11', version: '1.8.0'
+    flinkShadowJar "org.apache.flink:flink-core:${flinkVersion}"
+    flinkShadowJar "org.apache.flink:flink-connector-kafka_${scalaBinaryVersion}:${flinkVersion}"
+    flinkShadowJar "org.apache.flink:flink-streaming-java_${scalaBinaryVersion}:${flinkVersion}"
+    flinkShadowJar "org.apache.flink:flink-table:${flinkVersion}"
+    flinkShadowJar "org.apache.flink:flink-table-planner_${scalaBinaryVersion}:${flinkVersion}"
+    flinkShadowJar "org.apache.flink:flink-streaming-scala_${scalaBinaryVersion}:${flinkVersion}"
+    flinkShadowJar "org.apache.flink:flink-statebackend-rocksdb_${scalaBinaryVersion}:${flinkVersion}"
+    flinkShadowJar "org.apache.hadoop:hadoop-client:2.7.1"
+    flinkShadowJar "org.apache.kudu:kudu-client:1.8.0"
+    flinkShadowJar "com.alibaba:fastjson:1.2.56"
+    flinkShadowJar "ch.qos.logback:logback-core:1.2.3"
+    flinkShadowJar "ch.qos.logback:logback-classic:1.2.3"
+    flinkShadowJar "com.github.jsqlparser:jsqlparser:2.0"
+    flinkShadowJar "org.apache.commons:commons-jexl3:3.1"
+    flinkShadowJar "org.apache.flink:flink-test-utils_${scalaBinaryVersion}:${flinkVersion}"
+    flinkShadowJar "org.apache.flink:flink-cep_${scalaBinaryVersion}:${flinkVersion}"
 
-    flinkShadowJar(files('C:\\Users\\barneyye\\IdeaProjects\\flink-kudu-sink\\build\\libs\\flink-kudu-sink-1.0-SNAPSHOT.jar'))
-    flinkShadowJar(files('C:\\Users\\barneyye\\Downloads\\flink-executor-local.jar'))
+    flinkShadowJar(files('C:\\Users\\barneyye\\Downloads\\flink-executor_1.10-0.2.0.jar'))
 }
 
 // make compileOnly dependencies available for tests:
