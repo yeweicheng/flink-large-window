@@ -94,6 +94,9 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
         // 是否从0点开始算，一般用于天累计
         final boolean startZeroTime = Boolean.valueOf(params.getOrDefault("start.zero.time", "false"));
 
+        // 只输出最后的窗口，但如果有跨天的延迟数据的对应窗口也会输出
+        final boolean onlyLastOneWindow = Boolean.valueOf(params.getOrDefault("only.last.one.window", "false"));
+
         // 迟到数据是否重算它当前及之后的窗口
         final boolean recountLateData = Boolean.valueOf(params.getOrDefault("recount.late.data", "false"));
 
@@ -159,7 +162,8 @@ public class BigWindowJob implements IBrsExecutionEnvironment {
                 .setStartZeroTime(startZeroTime)
                 .setRecountLateData(recountLateData)
                 .setTriggerLateMs(triggerLateMs)
-                .setKeepLateZeroTime(keepLateZeroTime);
+                .setKeepLateZeroTime(keepLateZeroTime)
+                .setOnlyLastOneWindow(onlyLastOneWindow);
 
         if (StringUtils.isNotBlank(hkeyValueMap)) {
             processFunction = ((GlobalFunction) processFunction)

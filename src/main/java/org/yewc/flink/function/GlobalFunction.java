@@ -41,10 +41,10 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
     private ValueState<Object[]> preValue;
 
     /** 是否保留历史状态，一般没必要，一旦超过总窗口时间就清除 */
-    private boolean keepOldData;
+    private Boolean keepOldData;
 
     /** 是否总是计算，不管当前滑动是否没有数据流入 */
-    private boolean alwaysCalculate;
+    private Boolean alwaysCalculate;
 
     /** 总窗口大小，ms */
     private Long windowUnix;
@@ -56,19 +56,22 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
     private Long lateness;
 
     /** 总窗口大小/滑动窗口大小 */
-    private int windowSplit;
+    private Integer windowSplit;
 
     /** 时间字段在row中的位置 */
-    private int timeField;
+    private Integer timeField;
 
     /** 是否从0点开始 */
-    private boolean startZeroTime;
+    private Boolean startZeroTime;
+
+    /** 只输出最后的窗口，但如果有跨天的延迟数据的对应窗口也会输出 */
+    private Boolean onlyLastOneWindow;
 
     /** 0点开始的作业，对于昨天延迟数据会保留多久，毕竟昨天状态可能不全，不要超过windowUnix - 24小时，不填默认保留一个windowSplit */
     private Long keepLateZeroTime;
 
     /** 是否重算过期数据所包括的窗口值 */
-    private boolean recountLateData;
+    private Boolean recountLateData;
 
     /** 聚合元数据 */
     private JSONObject groupSchema;
@@ -80,7 +83,7 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
     private JSONArray fieldKey;
 
     /** 用于判断key是否触发过timer */
-    private Set<String> keyFlag;
+    private Set<String> keyFlag = new HashSet<>(5);;
 
     /** 记录key空值滑动次数，用于清理状态 */
     private Map<String, Integer> keyEmptyCount;
@@ -106,13 +109,13 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
     private String hkeySuffix;
 
     /** h key的field，如0 */
-    private int hkeyField;
+    private Integer hkeyField;
 
     /** h key的value下标和当前值映射，如0=0;1=1;2=2 */
     private Map<Integer, Integer> hkeyValueMap;
 
     /** h key的时间field，如0 */
-    private int hkeyValueTime;
+    private Integer hkeyValueTime;
 
     /** 详单分割字符 */
     private String splitDetailChar;
@@ -142,16 +145,6 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
 
     public static GlobalFunction getInstance() {
         return new GlobalFunction();
-    }
-
-    public GlobalFunction() {
-        this.keyFlag = new HashSet<>(5);
-
-        this.lateness = 0L;
-        this.alwaysCalculate = true;
-        this.keepOldData = false;
-        this.startZeroTime = false;
-        this.recountLateData = true;
     }
 
     @Override
@@ -192,8 +185,14 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
         try {
             if (!keyFlag.contains(key)) {
                 Long waterMark = waterMarkState.value();
-                currentWatermark = ctx.timerService().currentWatermark();
-                if (currentWatermark < 0) {
+
+                //如果只是最后窗口数据，那么就不用watermark了
+                if (!onlyLastOneWindow) {
+                    currentWatermark = ctx.timerService().currentWatermark();
+                    if (currentWatermark < 0) {
+                        currentWatermark = System.currentTimeMillis();
+                    }
+                } else {
                     currentWatermark = System.currentTimeMillis();
                 }
 
@@ -424,12 +423,7 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
                     primaryKeyState.put(dt, keys);
 
                     // 添加需要计算的时间窗口
-                    Set theRecountWindow = recountWindow.value();
-                    if (theRecountWindow == null) {
-                        theRecountWindow = new HashSet();
-                    }
-                    theRecountWindow.addAll(getBetweenTime(minStart, waterMark));
-                    recountWindow.update(theRecountWindow);
+                    figureWindows(minStart, waterMark);
                 }
             }
         }
@@ -590,15 +584,7 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
 
         // 记录当前及之后的窗口数据
         if (recountLateData) {
-            Set theRecount = recountWindow.value();
-            if (theRecount == null) {
-                theRecount = new HashSet();
-            }
-
-            if (!theRecount.contains(start)) {
-                theRecount.addAll(getBetweenTime(start, getEndDayTime(start)));
-                recountWindow.update(theRecount);
-            }
+            figureWindows(start, getEndDayTime(start));
         }
     }
 
@@ -664,15 +650,7 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
 
         // 记录当前及之后的窗口数据
         if (recountLateData) {
-            Set theRecount = recountWindow.value();
-            if (theRecount == null) {
-                theRecount = new HashSet();
-            }
-
-            if (!theRecount.contains(start)) {
-                theRecount.addAll(getBetweenTime(start, getEndDayTime(start)));
-                recountWindow.update(theRecount);
-            }
+            figureWindows(start, getEndDayTime(start));
         }
     }
 
@@ -849,8 +827,12 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
                     return null;
                 }
             }
-        } else if (recountLateData) {
+        } else if (recountLateData && !onlyLastOneWindow) {
             theRecountWindow.add(lastWindow);
+        }
+
+        if (theRecountWindow.size() == 0) {
+            return null;
         }
 
         Object[] valueTemp;
@@ -995,6 +977,45 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
         return result;
     }
 
+    private void figureWindows(Long start, Long end) throws Exception {
+        Set<Long> theRecount = recountWindow.value();
+        if (theRecount == null) {
+            theRecount = new HashSet<>();
+        }
+
+        if (!theRecount.contains(start)) {
+            theRecount.addAll(getBetweenTime(start, end));
+            if (onlyLastOneWindow && theRecount.size() > 0) {
+                if (startZeroTime) {
+                    Map<String, Long> keepTimes = new HashMap<>();
+                    SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
+                    for (Long time : theRecount) {
+                        String dt = sdf.format(new Date(time));
+
+                        Long maxTime = keepTimes.get(dt);
+                        if (maxTime == null || maxTime.compareTo(time) < 0) {
+                            keepTimes.put(dt, time);
+                        }
+                    }
+                    theRecount.clear();
+                    theRecount.addAll(keepTimes.values());
+                } else {
+                    Long maxTime = Long.MIN_VALUE;
+                    for (Long time : theRecount) {
+                        if (maxTime.compareTo(time) < 0) {
+                            maxTime = time;
+                        }
+                    }
+
+                    theRecount.clear();
+                    theRecount.add(maxTime);
+                }
+            }
+
+            recountWindow.update(theRecount);
+        }
+    }
+
     public GlobalFunction setKeepOldData(boolean keepOldData) {
         this.keepOldData = keepOldData;
         if (!keepOldData) {
@@ -1092,6 +1113,11 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
 
     public GlobalFunction setKeepLateZeroTime(Long keepLateZeroTime) {
         this.keepLateZeroTime = keepLateZeroTime;
+        return this;
+    }
+
+    public GlobalFunction setOnlyLastOneWindow(boolean onlyLastOneWindow) {
+        this.onlyLastOneWindow = onlyLastOneWindow;
         return this;
     }
 

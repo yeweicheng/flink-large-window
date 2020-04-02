@@ -37,7 +37,7 @@ public class DataStreamTest {
         // set up the execution environment
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         StreamTableEnvironment ste = StreamTableEnvironment.create(env);
-        env.setStreamTimeCharacteristic(TimeCharacteristic.ProcessingTime);
+        env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime);
         env.setStateBackend(new RocksDBStateBackend("hdfs://10.16.6.185:8020/flink/flink-rocksdb"));
         env.enableCheckpointing(60000, CheckpointingMode.EXACTLY_ONCE);
         env.setParallelism(1);
@@ -55,13 +55,11 @@ public class DataStreamTest {
 
         final Long windowSize = 86400000L + 3600000L;
         final Long slideSize = 60000L;
-        final Long lateness = 0L;
+        final Long lateness = 5000L;
 
         final int timeField = 4;
         final String groupString = "{\"field\": [\"key_0\", \"endtime\"], " +
                 "\"group\": [\"distinct_1\", \"distinct_long_2\", \"distinct_int_1\", \"count_1\"]}";
-
-        final boolean keepOldData = false;
 
         int[] keys = {0};
         final KeySelector keySelector = new RowKeySelector(keys, TypeInformation.of(Row.class));
@@ -73,18 +71,16 @@ public class DataStreamTest {
         DataStream midle = ste.toRetractStream(table, table.getSchema().toRowType());
 
         GlobalFunction gf = GlobalFunction.getInstance()
-                .setKeepOldData(keepOldData)
+                .setKeepOldData(false)
                 .setWindowSplit(slideSize, windowSize)
                 .setLateness(lateness)
                 .setTimeField(timeField)
                 .setGroupSchema(groupString)
-                .setAlwaysCalculate(true)
+                .setAlwaysCalculate(false)
                 .setStartZeroTime(true)
                 .setRecountLateData(true)
-                .setReduceInfo("fx.flink.consume.reduce", null, 3, 2,
-                        "0=0;1=1;2=0;3=0", ",")
-                .setRedisUtil("10.17.4.12", 9201, "kgtest.2019.pika");
-//                .setTriggerLateMs(60000L);
+                .setOnlyLastOneWindow(true)
+                .setKeepLateZeroTime(86400000L);
 
         DataStream counts = midle.map((v) -> {
                                 if (v instanceof Tuple2) {
