@@ -1,5 +1,6 @@
 package org.yewc.flink.function;
 
+import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
 import org.apache.commons.lang3.StringUtils;
@@ -652,6 +653,7 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
         if (recountLateData) {
             figureWindows(start, getEndDayTime(start));
         }
+
     }
 
     /**
@@ -831,6 +833,10 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
             theRecountWindow.add(lastWindow);
         }
 
+        if (onlyLastOneWindow && theGlobalWindow.containsKey(lastWindow - windowSlide)) {
+            theRecountWindow.add(lastWindow);
+        }
+
         if (theRecountWindow.size() == 0) {
             return null;
         }
@@ -974,6 +980,7 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
 
             result.add(temp);
         }
+
         return result;
     }
 
