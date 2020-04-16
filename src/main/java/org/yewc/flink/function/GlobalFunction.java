@@ -3,6 +3,7 @@ package org.yewc.flink.function;
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
+import com.google.common.collect.Lists;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.flink.api.common.state.*;
 import org.apache.flink.api.java.tuple.Tuple2;
@@ -268,7 +269,18 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
         }
 
         if (nextTrigger) {
-            waterMark += windowSlide;
+            if (waterMark == null) {
+                Iterator<Long> keys = globalWindow.keys().iterator();
+                waterMark = TimeWindow.getWindowStartWithOffset(System.currentTimeMillis(), 0, windowSlide) - windowSlide;
+                while (keys.hasNext()) {
+                    Long theTime = keys.next();
+                    if (waterMark.compareTo(theTime) > 0) {
+                        waterMark = theTime;
+                    }
+                }
+            } else {
+                waterMark += windowSlide;
+            }
             waterMarkState.update(waterMark);
 
             // 延迟也输出，暂不起用，有bug，如果延迟删了这个key，后面没有这个key的数据就永远不会触发了
