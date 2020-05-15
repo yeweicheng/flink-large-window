@@ -1,23 +1,29 @@
 package org.yewc.flink.function;
 
-import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
 import com.google.common.collect.Lists;
-import org.apache.commons.lang3.StringUtils;
-import org.apache.flink.api.common.state.*;
+import org.apache.flink.api.common.state.MapState;
+import org.apache.flink.api.common.state.MapStateDescriptor;
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.shaded.netty4.io.netty.util.internal.ConcurrentSet;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
+import org.apache.flink.streaming.api.operators.OnWatermarkCallback;
+import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.Collector;
 import org.roaringbitmap.RoaringBitmap;
 import org.roaringbitmap.longlong.Roaring64NavigableMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.yewc.flink.util.DateUtils;
 import org.yewc.flink.util.RichJedisReader;
-import org.yewc.flink.util.RichJedisWriter;
 
+import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -25,7 +31,9 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * 通用数据聚合函数
  */
-public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
+public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> implements OnWatermarkCallback {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(GlobalFunction.class);
 
     /** 保留最后的水印 */
     private ValueState<Long> waterMarkState;
@@ -85,7 +93,7 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
     private JSONArray fieldKey;
 
     /** 用于判断key是否触发过timer */
-    private Set<String> keyFlag = new HashSet<>(5);;
+    private Set<String> keyFlag = new ConcurrentSet<>();
 
     /** 记录key空值滑动次数，用于清理状态 */
     private Map<String, Integer> keyEmptyCount;
@@ -172,6 +180,8 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
         if (keepLateZeroTime == null || keepLateZeroTime == 0L) {
             keepLateZeroTime = windowSlide;
         }
+
+
     }
 
     @Override
@@ -266,6 +276,25 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
                 keyEmptyCount.remove(dataKey);
             }
             emptyFlag.update(true);
+        }
+
+        if (startZeroTime && onlyLastOneWindow) {
+            long currentTime = System.currentTimeMillis() - windowUnix;
+            long waterMarkTime = waterMark - keepLateZeroTime;
+            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
+            String waterMarkDt = sdf.format(new Date(waterMarkTime));
+
+            List<Long> theTimes = Lists.newArrayList(globalWindow.keys());
+            for (Long time : theTimes) {
+                String windowDt = sdf.format(new Date(time));
+                if (currentTime > time || (waterMarkTime > time && waterMarkDt.compareTo(windowDt) > 0)) {
+                    globalWindow.remove(time);
+                }
+            }
+
+            if (globalWindow.isEmpty()) {
+                nextTrigger = false;
+            }
         }
 
         if (nextTrigger) {
@@ -813,16 +842,21 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
      */
     public Object getValue() throws Exception {
 
-        Set theRecountWindow = recountWindow.value();
+        Set<Long> theRecountWindow = recountWindow.value();
+        Boolean flag = emptyFlag.value();
         if (theRecountWindow == null) {
             theRecountWindow = new HashSet();
         }
+
+        if (onlyLastOneWindow) {
+            getLastTime(theRecountWindow, flag);
+        }
+
         Map<Long, Object[]> theGlobalWindow = windowToMap();
         Long lastWindow = waterMarkState.value();
         Object[] value = preValue.value();
 
         // 如果没有最新分片的数据和要去除的数据，直接返回缓存值
-        Boolean flag = emptyFlag.value();
         if (flag == null || flag) {
             if (alwaysCalculate) {
                 // 当前空窗口数据也输出
@@ -844,10 +878,10 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
         } else if (recountLateData && !onlyLastOneWindow) {
             theRecountWindow.add(lastWindow);
         }
-
-        if (onlyLastOneWindow && theGlobalWindow.containsKey(lastWindow - windowSlide)) {
-            theRecountWindow.add(lastWindow);
-        }
+//
+//        if (onlyLastOneWindow && theGlobalWindow.containsKey(lastWindow - windowSlide)) {
+//            theRecountWindow.add(lastWindow);
+//        }
 
         if (theRecountWindow.size() == 0) {
             return null;
@@ -905,6 +939,34 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
             } else if (bt > windowSplit) {
                 removeKey.add(key);
             }
+        }
+
+        // 合并当天小于currentWindow窗口，减少计算
+        if (startZeroTime && onlyLastOneWindow
+                && distinctCountMap == null) { //暂不支持减法操作
+            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
+            // 同一天才合并
+            String currentDt = sdf.format(new Date(currentWindow - 1));
+            Long maxTime = Long.MIN_VALUE;
+            for (Long theTime : theGlobalWindow.keySet()) {
+                String dt = sdf.format(new Date(theTime));
+                if (maxTime.compareTo(theTime) < 0
+                        && theTime.compareTo(currentWindow) < 0
+                        && theTime.compareTo(currentWindow) < 0
+                        && currentDt.equals(dt)) {
+                    maxTime = theTime;
+                }
+            }
+
+            for (Long theTime : theGlobalWindow.keySet()) {
+                String dt = sdf.format(new Date(theTime));
+                if (maxTime.compareTo(theTime) > 0 && currentDt.equals(dt)) {
+                    removeKey.add(theTime);
+                }
+            }
+
+            // 将所有数据汇集在最后的窗口
+            theGlobalWindow.put(maxTime, tempValue);
         }
 
         for (int i = 0; i < removeKey.size(); i++) {
@@ -996,6 +1058,63 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
         return result;
     }
 
+    private void getLastTime(Set<Long> theRecountWindow, Boolean emptyFlag) throws Exception {
+        if (emptyFlag != null && emptyFlag) {
+            Set<Long> currentKeys = new HashSet<>(Lists.newArrayList(globalWindow.keys()));
+            Long waterMark = waterMarkState.value();
+            if (currentKeys.contains(waterMark - windowSlide)) {
+                theRecountWindow.add(waterMark);
+            }
+            return;
+        }
+
+        Set<Long> currentKeys = new HashSet<>(Lists.newArrayList(globalWindow.keys()));
+        Long waterMark = waterMarkState.value();
+        if (globalWindowBuffer != null) {
+            for (Map<Long, Object[]> temp : globalWindowBuffer.values()) {
+                currentKeys.addAll(temp.keySet());
+            }
+        }
+
+        SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
+        Map<String, Long> keepTimes = new HashMap<>();
+        for (Long key : theRecountWindow) {
+            String dt = sdf.format(new Date(key - 1));
+            if (!keepTimes.containsKey(dt)) {
+                keepTimes.put(dt, Long.MIN_VALUE);
+            }
+        }
+
+        for (Long key : currentKeys) {
+            if (key.compareTo(waterMark) < 0) {
+                theRecountWindow.add(key + windowSlide);
+            }
+        }
+
+        if (startZeroTime) {
+            for (Long key : theRecountWindow) {
+                String dt = sdf.format(new Date(key - 1));
+                if (keepTimes.containsKey(dt)) {
+                    Long theTime = keepTimes.get(dt);
+                    if (key.compareTo(waterMark) <= 0 && theTime.compareTo(key) < 0) {
+                        keepTimes.put(dt, key);
+                    }
+                }
+            }
+            theRecountWindow.clear();
+            theRecountWindow.addAll(keepTimes.values());
+        } else {
+            Long maxTime = Long.MIN_VALUE;
+            for (Long key : theRecountWindow) {
+                if (key.compareTo(waterMark) < 0 && maxTime.compareTo(key) < 0) {
+                    maxTime = key;
+                }
+            }
+            theRecountWindow.clear();
+            theRecountWindow.add(maxTime);
+        }
+    }
+
     private void figureWindows(Long start, Long end) throws Exception {
         Set<Long> theRecount = recountWindow.value();
         if (theRecount == null) {
@@ -1003,32 +1122,10 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
         }
 
         if (!theRecount.contains(start)) {
-            theRecount.addAll(getBetweenTime(start, end));
-            if (onlyLastOneWindow && theRecount.size() > 0) {
-                if (startZeroTime) {
-                    Map<String, Long> keepTimes = new HashMap<>();
-                    SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
-                    for (Long time : theRecount) {
-                        String dt = sdf.format(new Date(time));
-
-                        Long maxTime = keepTimes.get(dt);
-                        if (maxTime == null || maxTime.compareTo(time) < 0) {
-                            keepTimes.put(dt, time);
-                        }
-                    }
-                    theRecount.clear();
-                    theRecount.addAll(keepTimes.values());
-                } else {
-                    Long maxTime = Long.MIN_VALUE;
-                    for (Long time : theRecount) {
-                        if (maxTime.compareTo(time) < 0) {
-                            maxTime = time;
-                        }
-                    }
-
-                    theRecount.clear();
-                    theRecount.add(maxTime);
-                }
+            if (onlyLastOneWindow) {
+                theRecount.add(start + windowSlide);
+            } else {
+                theRecount.addAll(getBetweenTime(start, end));
             }
 
             recountWindow.update(theRecount);
@@ -1170,5 +1267,10 @@ public class GlobalFunction extends KeyedProcessFunction<Row, Row, Tuple2> {
         return this;
     }
 
+    @Override
+    public void onWatermark(Object o, Watermark watermark) throws IOException {
+        System.out.println(o);
+        System.out.println(watermark.getTimestamp());
+    }
 }
 
